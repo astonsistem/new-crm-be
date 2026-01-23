@@ -11,12 +11,13 @@ class Settings(BaseSettings):
     api_version: str = "1.0.0"
     
     # Database
-    database_url: str = "sqlite:///./crm.db"
+    database_url: str = "postgresql://postgres:postgres@localhost:5432/crm_db"
     
     # Security
-    secret_key: str = "your-secret-key-change-in-production"
+    secret_key: str = "your-secret-key-change-in-production-minimum-32-characters-long"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 7
     
     class Config:
         env_file = ".env"
