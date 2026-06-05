@@ -8,6 +8,7 @@ venv/
 env/
 ENV/
 .venv
+__init__.py
 
 # IDE
 .vscode/
@@ -15,10 +16,41 @@ ENV/
 *.swp
 *.swo
 *~
+*.xlsx
+*.xls
+*.csv
+*.json
+*.xml
+*.yaml
+*.yml
+*.toml
+*.cfg
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.ico
+*.webp
+*.svg
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.odt
+*.ods
+*.odp
+*.odg
+*.odf
+*.sql
+*.md
 
 # Environment
 .env
 .env.local
+.env.example
 
 # Database
 *.db
