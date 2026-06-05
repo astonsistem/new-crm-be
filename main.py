@@ -100,6 +100,8 @@ app = FastAPI(
     # Hide /docs & /redoc in production
     docs_url="/docs",
     redoc_url="/redoc" if settings.debug else None,
+    root_path="/api",
+    servers=[{"url": "/api", "description": "API Server"}],
 )
 
 # ─── TAMBAHKAN INI (OVERRIDE OPENAPI VERSION) ───────────────────────────────
@@ -269,6 +271,8 @@ app.include_router(asis_warehouse_router)
 os.makedirs("uploads", exist_ok=True)
 app.mount("/files", StaticFiles(directory="uploads"), name="files")
 
+# Tambahkan ini
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ─── Health endpoints ─────────────────────────────────────────────────────────
 
