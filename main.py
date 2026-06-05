@@ -98,7 +98,7 @@ app = FastAPI(
     version=settings.api_version,
     lifespan=lifespan,
     # Hide /docs & /redoc in production
-    docs_url="/docs" if settings.debug else None,
+    docs_url="/docs",
     redoc_url="/redoc" if settings.debug else None,
 )
 
