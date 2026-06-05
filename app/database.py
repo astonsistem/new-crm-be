@@ -1,28 +1,54 @@
-from sqlalchemy import create_engine
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
+from datetime import datetime
+
+from sqlalchemy import DateTime, event
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Session
+
 from app.config import get_settings
+from app.utils.datetime_utils import to_naive_datetime
 
 settings = get_settings()
 
-# Create database engine
-engine = create_engine(
+engine = create_async_engine(
     settings.database_url,
-    echo=settings.debug,
-    pool_pre_ping=True
+    echo=False,          # SQL query logging is handled via app/core/logging.py
+    pool_pre_ping=True,
 )
 
-# Create session factory
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+AsyncSessionLocal = async_sessionmaker(
+    bind=engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
 
-# Create base class for models
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
 
 
-def get_db():
-    """Dependency to get database session"""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+@event.listens_for(Session, "before_flush")
+def _normalize_naive_datetimes(session, flush_context, instances):
+    """Strip timezone from DateTime columns before asyncpg encode."""
+    for obj in list(session.new) + list(session.dirty):
+        mapper = getattr(obj.__class__, "__mapper__", None)
+        if mapper is None:
+            continue
+        for attr in mapper.column_attrs:
+            col = attr.columns[0]
+            if not isinstance(col.type, DateTime) or getattr(col.type, "timezone", False):
+                continue
+            val = getattr(obj, attr.key, None)
+            if isinstance(val, datetime) and val.tzinfo is not None:
+                setattr(obj, attr.key, to_naive_datetime(val))
+
+
+async def get_db():
+    """FastAPI dependency — yields an AsyncSession per request.
+    Automatically rolls back any uncommitted changes when an exception propagates.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
