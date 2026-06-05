@@ -102,6 +102,27 @@ app = FastAPI(
     redoc_url="/redoc" if settings.debug else None,
 )
 
+# ─── TAMBAHKAN INI (OVERRIDE OPENAPI VERSION) ───────────────────────────────
+from fastapi.openapi.utils import get_openapi
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    
+    openapi_schema["openapi"] = "3.0.3"  # Force ke 3.0.x
+    
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
+
 # ─── Middleware (order matters: outermost executes first) ─────────────────────
 
 app.add_middleware(
