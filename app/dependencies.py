@@ -1,64 +1,74 @@
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from uuid import UUID
 from app.database import get_db
 from app.models import User
 from app.utils.security import decode_token
+from app.utils.eager_loads import user_joinedload_options
+from app.core.logging import get_logger
 
+logger = get_logger("app.auth")
 
-security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
+
+_CREDENTIALS_EXCEPTION = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Could not validate credentials",
+    headers={"WWW-Authenticate": "Bearer"},
+)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db)
+    token: str = Depends(oauth2_scheme),
+    db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Get current authenticated user from JWT token"""
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    
-    token = credentials.credentials
+    """Decode JWT access token and return the authenticated User."""
     payload = decode_token(token)
-    
+
     if payload is None:
-        raise credentials_exception
-    
-    # Check token type
+        logger.warning("Token decode failed — invalid or expired token.")
+        raise _CREDENTIALS_EXCEPTION
+
     if payload.get("type") != "access":
-        raise credentials_exception
-    
+        logger.warning("Token type mismatch: expected 'access', got '%s'.", payload.get("type"))
+        raise _CREDENTIALS_EXCEPTION
+
     user_id_str: str = payload.get("sub")
-    if user_id_str is None:
-        raise credentials_exception
-    
-    # Convert to int
-    user_id = int(user_id_str)
-    
-    user = db.query(User).filter(User.id == user_id).first()
+    if not user_id_str:
+        logger.warning("Token is missing 'sub' claim.")
+        raise _CREDENTIALS_EXCEPTION
+
+    try:
+        user_id = UUID(user_id_str)
+    except (ValueError, AttributeError):
+        logger.warning("Token 'sub' claim is not a valid UUID: %s", user_id_str)
+        raise _CREDENTIALS_EXCEPTION
+
+    result = await db.execute(
+        select(User)
+        .options(*user_joinedload_options())
+        .where(User.id == user_id)
+    )
+    user = result.scalar_one_or_none()
+
     if user is None:
-        raise credentials_exception
-    
+        logger.warning("Authenticated user not found in DB (id=%s).", user_id)
+        raise _CREDENTIALS_EXCEPTION
+
     if not user.is_active:
+        logger.warning("Login attempt by inactive user '%s' (id=%s).", user.username, user_id)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user"
+            detail="Inactive user account",
         )
-    
+
     return user
 
 
 async def get_current_active_user(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ) -> User:
-    """Get current active user"""
-    if not current_user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Inactive user"
-        )
+    """Alias kept for backward compatibility — returns the authenticated user."""
     return current_user
-
-
