@@ -6,6 +6,8 @@ from decimal import Decimal
 
 # Import service schema for unified response
 from app.schemas.orders.service import OrderServiceResponse
+from app.schemas.auth import ProvinceDetail, DistrictDetail
+from app.schemas.customer import SalesInfo
 
 
 # Order Status Response Schema
@@ -27,12 +29,31 @@ class MOUBasicResponse(BaseModel):
         from_attributes = True
 
 
+# Parent region customer (self-referential FK: customers.region_id → customers.id)
+class CustomerRegionResponse(BaseModel):
+    id: UUID
+    name: str
+    type: str
+
+    class Config:
+        from_attributes = True
+
+
 # Customer Basic Response Schema
 class CustomerBasicResponse(BaseModel):
     id: UUID
     name: str
     type: str
-    
+    PIC: Optional[str] = None
+    pic_phone: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    province: Optional[ProvinceDetail] = None
+    district: Optional[DistrictDetail] = None
+    region: Optional[CustomerRegionResponse] = None
+    # ORM relationship is `sales_user` on Customer (FK: customers.sales_id → users.id)
+    sales: Optional[SalesInfo] = Field(default=None, validation_alias="sales_user")
+
     class Config:
         from_attributes = True
 
@@ -183,6 +204,9 @@ class SalesOrderLogItem(BaseModel):
     total: Decimal
     customer_name: str
     customer_type: str
+    customer_pic: Optional[str] = None
+    customer_pic_phone: Optional[str] = None
+    customer_phone: Optional[str] = None
     order_details: List[OrderCustomerDetailResponse] = []
     
     class Config:

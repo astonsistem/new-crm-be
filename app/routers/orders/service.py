@@ -23,10 +23,13 @@ from app.schemas.orders.service import (
     ServiceScheduleRequest,
     ServiceProcessRequest,
     ServiceCompleteRequest,
+    ServiceCancelRequest,
     MyCustomersServicesResponse,
     ServiceActivityLogResponse
 )
+from app.routers.service_point import ensure_service_point_exists
 from app.utils.db_queries import fetch_first
+from app.utils.excel_export import format_worksheet
 from app.utils.datetime_utils import OptionalNaiveDatetime
 from pydantic import BaseModel
 
@@ -56,6 +59,7 @@ def _service_load_options(*, include_user_customer: bool = False):
         joinedload(Order_Service.mou),
         joinedload(Order_Service.status_service),
         joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
+        joinedload(Order_Service.service_point),
         created_user_load,
         joinedload(Order_Service.activity_logs).joinedload(Service_Activity_Log.user),
     ]
@@ -110,6 +114,7 @@ async def get_order_services(
     mou_id: Optional[UUID] = None,
     status_service_id: Optional[UUID] = None,
     mou_device_id: Optional[UUID] = None,
+    service_point_id: Optional[UUID] = Query(None, description="Filter by service point ID"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -145,6 +150,9 @@ async def get_order_services(
 
     if mou_device_id:
         stmt = stmt.where(Order_Service.mou_device_id == mou_device_id)
+
+    if service_point_id:
+        stmt = stmt.where(Order_Service.service_point_id == service_point_id)
 
     order_services = (await db.execute(stmt.offset(skip).limit(limit))).unique().scalars().all()
 
@@ -311,12 +319,16 @@ async def export_service_order_log(
     stmt = select(
         Order_Service,
         Customer.name.label('customer_name'),
-        Customer.type.label('customer_type')
+        Customer.type.label('customer_type'),
+        Customer.PIC.label('customer_pic'),
+        Customer.pic_phone.label('customer_pic_phone'),
+        Customer.phone.label('customer_phone'),
     ).options(
         joinedload(Order_Service.mou),
         joinedload(Order_Service.status_service),
         joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
-        joinedload(Order_Service.created_user)
+        joinedload(Order_Service.created_user),
+        joinedload(Order_Service.service_point),
     ).join(MOU, Order_Service.mou_id == MOU.id)\
      .join(Customer, MOU.customer_id == Customer.id)
 
@@ -344,12 +356,19 @@ async def export_service_order_log(
         service = service_data[0]
         cust_name = service_data[1]
         cust_type = service_data[2]
+        cust_pic = service_data[3]
+        cust_pic_phone = service_data[4]
+        cust_phone = service_data[5]
 
-        device_info = "N/A"
+        asset_name = "N/A"
+        serial_code = "N/A"
         if service.mou_device and service.mou_device.serial_number:
-            asset_name = service.mou_device.serial_number.asset.asset_name if service.mou_device.serial_number.asset else "N/A"
+            asset_name = (
+                service.mou_device.serial_number.asset.asset_name
+                if service.mou_device.serial_number.asset
+                else "N/A"
+            )
             serial_code = service.mou_device.serial_number.serial_code
-            device_info = f"{asset_name} - {serial_code}"
 
         created_by_name = service.created_user.name if service.created_user else "N/A"
 
@@ -359,9 +378,16 @@ async def export_service_order_log(
             'Service Date Description': service.service_date_description or 'N/A',
             'Customer Name': cust_name,
             'Customer Type': cust_type,
-            'Device Info': device_info,
+            'Customer PIC': cust_pic or '',
+            'Customer PIC Phone': cust_pic_phone or '',
+            'Customer Phone': cust_phone or '',
+            'Asset Name': asset_name,
+            'Serial Code': serial_code,
             'Status': service.status_service.name if service.status_service else 'N/A',
             'Description': service.description or 'N/A',
+            'Service Cost': float(service.service_cost) if service.service_cost is not None else 0,
+            'Service Point': service.service_point.name if service.service_point else 'N/A',
+            'Service Point Address': service.service_point.address if service.service_point else 'N/A',
             'MOU Number': service.mou.no_mou if service.mou else 'N/A',
             'Created By': created_by_name,
             'Created At': service.created_at.strftime('%Y-%m-%d'),
@@ -371,8 +397,10 @@ async def export_service_order_log(
 
     df = pd.DataFrame(excel_data) if excel_data else pd.DataFrame(columns=[
         'Service Number', 'Service Date', 'Service Date Description',
-        'Customer Name', 'Customer Type', 'Device Info', 'Status',
-        'Description', 'MOU Number', 'Created By', 'Created At',
+        'Customer Name', 'Customer Type', 'Customer PIC', 'Customer PIC Phone', 'Customer Phone',
+        'Asset Name', 'Serial Code', 'Status',
+        'Description', 'Service Cost', 'Service Point', 'Service Point Address',
+        'MOU Number', 'Created By', 'Created At',
         'Completed At', 'Service Days'
     ])
 
@@ -380,19 +408,7 @@ async def export_service_order_log(
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, sheet_name='Service Order Log', index=False)
 
-        worksheet = writer.sheets['Service Order Log']
-
-        for column in worksheet.columns:
-            max_length = 0
-            column_letter = column[0].column_letter
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = min(max_length + 2, 50)
-            worksheet.column_dimensions[column_letter].width = adjusted_width
+        format_worksheet(writer.sheets["Service Order Log"])
 
     output.seek(0)
 
@@ -524,6 +540,9 @@ async def create_order_service(
                 detail=f"Device is not available for service. Current status: {mou_device.status}"
             )
 
+    if service_data.service_point_id:
+        await ensure_service_point_exists(db, service_data.service_point_id)
+
     request_status = await get_or_create_service_status(db, "REQUEST")
     service_number = await generate_service_number(db)
 
@@ -536,6 +555,8 @@ async def create_order_service(
         mou_device_id=service_data.mou_device_id,
         status_service_id=request_status.id,
         description=service_data.description,
+        service_cost=service_data.service_cost,
+        service_point_id=service_data.service_point_id,
         created_by=current_user.id
     )
 
@@ -590,6 +611,11 @@ async def schedule_service_order(
     order_service.status_service_id = pending_status.id
     order_service.service_date = schedule_data.service_date
     order_service.service_date_description = schedule_data.service_date_description
+    if schedule_data.service_cost is not None:
+        order_service.service_cost = schedule_data.service_cost
+    if schedule_data.service_point_id is not None:
+        await ensure_service_point_exists(db, schedule_data.service_point_id)
+        order_service.service_point_id = schedule_data.service_point_id
 
     schedule_description = f"Service telah dijadwalkan untuk tanggal {schedule_data.service_date.strftime('%Y-%m-%d')}"
     if schedule_data.service_date_description:
@@ -643,6 +669,11 @@ async def process_service_order(
     process_status = await get_or_create_service_status(db, "PROCESS")
 
     order_service.status_service_id = process_status.id
+    if process_data and process_data.service_cost is not None:
+        order_service.service_cost = process_data.service_cost
+    if process_data and process_data.service_point_id is not None:
+        await ensure_service_point_exists(db, process_data.service_point_id)
+        order_service.service_point_id = process_data.service_point_id
 
     activity_log = Service_Activity_Log(
         service_id=service_id,
@@ -725,6 +756,8 @@ async def complete_service_order(
 
     order_service.status_service_id = complete_status.id
     order_service.completed_at = datetime.now()
+    if complete_data and complete_data.service_cost is not None:
+        order_service.service_cost = complete_data.service_cost
 
     if order_service.mou_device.status == "SERVICE":
         order_service.mou_device.status = "ACTIVE"
@@ -750,3 +783,72 @@ async def complete_service_order(
     response.service_days = service_days
 
     return response
+
+
+@router.put("/{service_id}/cancel", response_model=OrderServiceResponse)
+async def cancel_service_order(
+    service_id: UUID,
+    cancel_data: Optional[ServiceCancelRequest] = None,
+    current_user: User = Depends(require_permission(Permission.UPDATE_SERVICE)),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Cancel a service order and reactivate the device.
+    Status can change from REQUEST, PENDING, or PROCESS to CANCELLED.
+    """
+
+    order_service = (await db.execute(
+        select(Order_Service).options(
+            joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number),
+            joinedload(Order_Service.status_service)
+        ).where(Order_Service.id == service_id)
+    )).scalar_one_or_none()
+
+    if not order_service:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order service not found"
+        )
+
+    current_status = order_service.status_service.name if order_service.status_service else None
+
+    if current_status == "CANCELLED":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Service is already cancelled"
+        )
+
+    if current_status == "COMPLETE":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot cancel a completed service"
+        )
+
+    allowed_statuses = ["REQUEST", "PENDING", "PROCESS"]
+    if current_status not in allowed_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Service must be in REQUEST, PENDING, or PROCESS status to cancel. Current status: {current_status}"
+        )
+
+    cancelled_status = await get_or_create_service_status(db, "CANCELLED")
+
+    order_service.status_service_id = cancelled_status.id
+
+    if order_service.mou_device.status == "SERVICE":
+        order_service.mou_device.status = "ACTIVE"
+        order_service.mou_device.serial_number.status = "ACTIVE"
+
+    activity_log = Service_Activity_Log(
+        service_id=service_id,
+        status="service_cancelled",
+        description=(cancel_data.description if cancel_data else None) or "Service telah dibatalkan",
+        created_by=current_user.id
+    )
+    db.add(activity_log)
+
+    await db.commit()
+
+    order_service = await fetch_order_service(db, service_id)
+
+    return OrderServiceResponse.model_validate(order_service)

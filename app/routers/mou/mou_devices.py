@@ -8,9 +8,15 @@ from app.dependencies import get_current_active_user, get_db
 from app.models import User
 from app.models.mou import MOU, MOU_Device
 from app.models.serial_number import Serial_Number
-from app.models.asset import Asset
-from app.models.customer import Customer
 from app.schemas.mou_device import MOUDeviceCreate, MOUDeviceUpdate, MOUDeviceResponse
+from app.routers.mou.mou_device_helpers import (
+    build_mou_device_id_query,
+    build_mou_devices_excel_response,
+    enrich_mou_device_response,
+    ensure_serial_assignable_to_mou,
+    fetch_mou_devices_by_ids,
+    mou_device_to_export_row,
+)
 from app.utils.eager_loads import mou_device_load_options
 from pydantic import BaseModel
 
@@ -18,7 +24,7 @@ from pydantic import BaseModel
 class MOUDeviceListResponse(BaseModel):
     data: List[MOUDeviceResponse]
     total: int
-    
+
 router = APIRouter(prefix="/mou-devices", tags=["MOU Devices"])
 
 
@@ -42,46 +48,12 @@ async def get_all_mou_devices(
     - **customer_id**: Filter by specific customer (optional)
     - **status**: Filter by device status: ACTIVE, INACTIVE, SERVICE (optional)
     """
-    conditions = []
-    join_serial = False
-    join_asset = False
-    join_mou = False
-    join_customer = False
-
-    if search:
-        join_serial = True
-        join_asset = True
-        join_mou = True
-        join_customer = True
-        search_term = search.lower()
-        conditions.append(
-            func.lower(Serial_Number.serial_code).contains(search_term) |
-            func.lower(Asset.asset_name).contains(search_term) |
-            func.lower(Customer.name).contains(search_term) |
-            func.lower(MOU.no_mou).contains(search_term)
-        )
-
-    if mou_id:
-        conditions.append(MOU_Device.mou_id == mou_id)
-
-    if customer_id:
-        join_mou = True
-        conditions.append(MOU.customer_id == customer_id)
-
-    if status_filter:
-        conditions.append(MOU_Device.status == status_filter)
-
-    id_stmt = select(MOU_Device.id)
-    if join_serial:
-        id_stmt = id_stmt.outerjoin(Serial_Number, MOU_Device.serial_number_id == Serial_Number.id)
-    if join_asset:
-        id_stmt = id_stmt.outerjoin(Asset, Serial_Number.asset_id == Asset.id)
-    if join_mou:
-        id_stmt = id_stmt.outerjoin(MOU, MOU_Device.mou_id == MOU.id)
-    if join_customer:
-        id_stmt = id_stmt.outerjoin(Customer, MOU.customer_id == Customer.id)
-    if conditions:
-        id_stmt = id_stmt.where(*conditions)
+    id_stmt = build_mou_device_id_query(
+        search=search,
+        mou_id=mou_id,
+        customer_id=customer_id,
+        status_filter=status_filter,
+    )
 
     total = (await db.execute(
         select(func.count()).select_from(id_stmt.subquery())
@@ -92,13 +64,7 @@ async def get_all_mou_devices(
         select(MOU_Device).options(*mou_device_load_options()).where(MOU_Device.id.in_(paginated_ids))
     )).scalars().all()
 
-    result = []
-    for device in devices:
-        item = MOUDeviceResponse.model_validate(device)
-        if device.mou and device.mou.customer:
-            item.mou.customer_id = device.mou.customer_id
-            item.mou.customer_name = device.mou.customer.name
-        result.append(item)
+    result = [enrich_mou_device_response(device) for device in devices]
 
     return MOUDeviceListResponse(data=result, total=total)
 
@@ -113,8 +79,8 @@ async def get_my_mou_devices(
 ):
     """
     Get all devices assigned to the current customer's MOUs
-    
-    For customers: Returns ACTIVE and SERVICE devices (ready for use or being serviced)  
+
+    For customers: Returns ACTIVE and SERVICE devices (ready for use or being serviced)
     For sales: Can see all devices with show_all=true
     """
     if not current_user.customer_id:
@@ -149,6 +115,32 @@ async def get_my_mou_devices(
     return MOUDeviceListResponse(data=devices, total=total)
 
 
+@router.get("/export")
+async def export_mou_devices(
+    search: Optional[str] = Query(None, description="Search across serial number, asset name, customer name, MOU number"),
+    mou_id: Optional[UUID] = Query(None, description="Filter by MOU ID"),
+    customer_id: Optional[UUID] = Query(None, description="Filter by Customer ID"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by device status (ACTIVE, INACTIVE, SERVICE)"),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export MOU devices to Excel. Uses the same filters as the list endpoint."""
+    id_stmt = build_mou_device_id_query(
+        search=search,
+        mou_id=mou_id,
+        customer_id=customer_id,
+        status_filter=status_filter,
+    )
+
+    devices = await fetch_mou_devices_by_ids(db, id_stmt)
+    rows = [
+        mou_device_to_export_row(enrich_mou_device_response(device))
+        for device in devices
+    ]
+
+    return build_mou_devices_excel_response(rows)
+
+
 @router.get("/{mou_id}", response_model=MOUDeviceListResponse)
 async def get_mou_devices(
     mou_id: UUID,
@@ -157,7 +149,7 @@ async def get_mou_devices(
 ):
     """
     Get list of all devices (printers) assigned to a specific MOU
-    
+
     - **mou_id**: MOU ID (required)
     """
     mou = (await db.execute(
@@ -188,7 +180,7 @@ async def get_mou_device(
 ):
     """
     Get a specific MOU device by ID
-    
+
     - **device_id**: MOU Device ID (required)
     """
     device = (await db.execute(
@@ -213,7 +205,7 @@ async def create_mou_device(
 ):
     """
     Assign a device (printer) to an MOU
-    
+
     - **mou_id**: MOU ID in URL (required)
     - **serial_number_id**: Serial number ID of the device to assign (required)
     """
@@ -239,6 +231,8 @@ async def create_mou_device(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Serial number not found"
         )
+
+    ensure_serial_assignable_to_mou(serial_number)
 
     existing = (await db.execute(
         select(MOU_Device).where(
@@ -282,7 +276,7 @@ async def update_mou_device(
 ):
     """
     Update an MOU device assignment
-    
+
     - **device_id**: MOU Device ID (required)
     - Can update mou_id or serial_number_id
     """
@@ -323,6 +317,8 @@ async def update_mou_device(
                 detail="Serial number not found"
             )
 
+        ensure_serial_assignable_to_mou(serial_number)
+
     for key, value in update_data.items():
         setattr(device, key, value)
 
@@ -344,7 +340,7 @@ async def delete_mou_device(
 ):
     """
     Remove a device assignment from MOU permanently
-    
+
     - **device_id**: MOU Device ID (required)
     - ⚠️ This action cannot be undone
     """
@@ -373,7 +369,7 @@ async def activate_mou_device(
 ):
     """
     Activate an MOU device (Sales only)
-    
+
     Changes device status from INACTIVE to ACTIVE so customers can use it for service orders
     """
     if not current_user.role or current_user.role.scope != "SALES":
@@ -406,6 +402,8 @@ async def activate_mou_device(
             detail="Cannot activate device while it's being serviced"
         )
 
+    ensure_serial_assignable_to_mou(device.serial_number)
+
     device.status = "ACTIVE"
     device.serial_number.status = "ACTIVE"
 
@@ -428,7 +426,7 @@ async def deactivate_mou_device(
 ):
     """
     Deactivate an MOU device (Sales only)
-    
+
     Changes device status from ACTIVE to INACTIVE
     """
     if not current_user.role or current_user.role.scope != "SALES":

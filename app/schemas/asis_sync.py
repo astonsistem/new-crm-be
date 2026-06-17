@@ -170,6 +170,11 @@ class AsisBranchPreview(BaseModel):
     already_synced: bool = False
 
 
+class AsisBranchPreviewListResponse(BaseModel):
+    data: List[AsisBranchPreview]
+    total: int
+
+
 # ── Warehouse ─────────────────────────────────────────────────────────────────
 
 class AsisBranchBrief(BaseModel):
@@ -257,6 +262,11 @@ class AsisWarehousePreview(BaseModel):
     is_kongsi: bool
     is_kongsi_vendor: bool
     already_synced: bool = False
+
+
+class AsisWarehousePreviewListResponse(BaseModel):
+    data: List[AsisWarehousePreview]
+    total: int
 
 
 # ── Sync result ───────────────────────────────────────────────────────────────

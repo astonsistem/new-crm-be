@@ -1,3 +1,5 @@
+import asyncio
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from sqlalchemy import select
 from datetime import datetime
@@ -15,58 +17,59 @@ _scheduler = AsyncIOScheduler()
 
 
 async def _expire_mous() -> None:
-    """Mark ACTIVE MOUs past their end_date as INACTIVE (runs in the main event loop)."""
-    async with AsyncSessionLocal() as db:
-        try:
-            inactive_status_id = await fetch_scalar_first(
-                db, select(Status_MOU.id).where(Status_MOU.name == "INACTIVE")
-            )
-            if not inactive_status_id:
-                logger.warning(
-                    "INACTIVE status not found in status_mou table — skipping MOU expiry job."
+    """Log ACTIVE MOUs past end_date. Renewal/close is handled via API endpoints."""
+    try:
+        async with AsyncSessionLocal() as db:
+            try:
+                active_status_id = await fetch_scalar_first(
+                    db, select(Status_MOU.id).where(Status_MOU.name == "ACTIVE")
                 )
-                return
+                if not active_status_id:
+                    logger.warning(
+                        "ACTIVE status not found in status_mou table — skipping MOU expiry check."
+                    )
+                    return
 
-            active_status_id = await fetch_scalar_first(
-                db, select(Status_MOU.id).where(Status_MOU.name == "ACTIVE")
-            )
-            if not active_status_id:
-                logger.warning(
-                    "ACTIVE status not found in status_mou table — skipping MOU expiry job."
-                )
-                return
+                expired_mous = (await db.execute(
+                    select(MOU).where(
+                        MOU.status_mou_id == active_status_id,
+                        MOU.end_date < datetime.now(),
+                        MOU.deleted_at.is_(None),
+                    )
+                )).scalars().all()
 
-            expired_mous = (await db.execute(
-                select(MOU).where(
-                    MOU.status_mou_id == active_status_id,
-                    MOU.end_date < datetime.now(),
-                    MOU.deleted_at.is_(None),
-                )
-            )).scalars().all()
+                if expired_mous:
+                    mou_numbers = [m.no_mou for m in expired_mous]
+                    logger.info(
+                        "%d MOU(s) past end_date awaiting renewal decision: %s",
+                        len(expired_mous),
+                        mou_numbers,
+                    )
+                else:
+                    logger.debug("No expired MOUs found.")
 
-            if expired_mous:
-                mou_numbers = [m.no_mou for m in expired_mous]
-                for mou in expired_mous:
-                    mou.status_mou_id = inactive_status_id
-                await db.commit()
-                logger.info("Expired %d MOU(s): %s", len(expired_mous), mou_numbers)
-            else:
-                logger.debug("No expired MOUs found.")
+            except Exception:
+                logger.exception("Error while running MOU expiry check.")
+    except asyncio.CancelledError:
+        logger.debug("MOU expiry job cancelled during server shutdown.")
 
-        except Exception:
-            await db.rollback()
-            logger.exception("Error while running MOU expiry job.")
+
+async def run_mou_expiry_check() -> None:
+    """Run MOU expiry once during startup (before the server accepts requests)."""
+    await _expire_mous()
 
 
 def start_scheduler() -> None:
     """Start the async scheduler. Must be called inside a running asyncio event loop."""
+    if _scheduler.running:
+        return
     _scheduler.add_job(_expire_mous, "cron", hour=0, minute=0, id="expire_mous_daily")
-    _scheduler.add_job(_expire_mous, "date", id="expire_mous_startup")
     _scheduler.start()
-    logger.info("MOU expiry scheduler started — runs daily at midnight.")
+    logger.info("MOU expiry scheduler started — logs expired MOUs daily at midnight.")
 
 
 def stop_scheduler() -> None:
     """Stop the scheduler on application shutdown."""
-    _scheduler.shutdown(wait=False)
-    logger.info("MOU expiry scheduler stopped.")
+    if _scheduler.running:
+        _scheduler.shutdown(wait=False)
+        logger.info("MOU expiry scheduler stopped.")

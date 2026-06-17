@@ -12,6 +12,7 @@ class Customer(Base):
     type = Column(Enum("COMPANY", "REGION", "BRANCH", name="customer_type_enum"), nullable=False)
     name = Column(String(100), nullable=False)
     PIC = Column(String(100), nullable=True)
+    pic_phone = Column(String(20), nullable=True)
     email = Column(String(100), nullable=True)
     phone = Column(String(20), nullable=True)
     address = Column(String(512), nullable=True)

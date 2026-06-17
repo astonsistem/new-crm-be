@@ -26,6 +26,7 @@ class User(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     name = Column(String(100), nullable=False)
     username = Column(String(50), unique=True, nullable=False, index=True)
+    phone = Column(String(50), nullable=True)
     password = Column(String(255), nullable=False)
     role_id = Column(UUID(as_uuid=True), ForeignKey("roles.id"), nullable=True)
     is_active = Column(Boolean, default=True)

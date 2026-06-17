@@ -1,4 +1,9 @@
+import io
+import os
+
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
@@ -10,6 +15,7 @@ from app.models import User, Category
 from app.models.asset import Asset
 from app.models.serial_number import Serial_Number
 from app.schemas.asset import AssetCreate, AssetUpdate, AssetResponse
+from app.utils.excel_export import format_worksheet
 from app.utils.permissions import require_permission, Permission
 from pydantic import BaseModel
 
@@ -24,6 +30,88 @@ router = APIRouter(prefix="/assets", tags=["Assets"])
 
 def _asset_opts():
     return [selectinload(Asset.category)]
+
+
+def _apply_asset_filters(
+    stmt,
+    *,
+    category_id: Optional[UUID] = None,
+    name: Optional[str] = None,
+    include_deleted: bool = False,
+):
+    if not include_deleted:
+        stmt = stmt.where(Asset.deleted_at.is_(None))
+    if category_id:
+        stmt = stmt.where(Asset.category_id == category_id)
+    if name:
+        stmt = stmt.where(Asset.asset_name.ilike(f"%{name}%"))
+    return stmt
+
+
+@router.get("/export")
+async def export_assets(
+    category_id: Optional[UUID] = Query(None, description="Filter by category ID"),
+    name: Optional[str] = Query(None, description="Filter by asset name (partial, case-insensitive)"),
+    include_deleted: bool = Query(False, description="Include soft-deleted assets"),
+    current_user: User = Depends(require_permission(Permission.READ_ASSET)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export assets to Excel."""
+    sn_subq = (
+        select(Serial_Number.asset_id, func.count(Serial_Number.id).label("serial_number_count"))
+        .group_by(Serial_Number.asset_id)
+    ).subquery()
+
+    stmt = (
+        select(Asset, sn_subq.c.serial_number_count)
+        .outerjoin(sn_subq, Asset.id == sn_subq.c.asset_id)
+        .options(*_asset_opts())
+    )
+    stmt = _apply_asset_filters(
+        stmt, category_id=category_id, name=name, include_deleted=include_deleted
+    )
+    stmt = stmt.order_by(Asset.asset_name)
+
+    rows = (await db.execute(stmt)).all()
+
+    assets_data = []
+    for row in rows:
+        asset = row[0]
+        sn_count = row[1] or 0
+        assets_data.append({
+            "Asset Name": asset.asset_name,
+            "Asset Type": asset.asset_type,
+            "Category": asset.category.name if asset.category else "N/A",
+            "Category Description": asset.category.description if asset.category else "",
+            "Serial Number Count": sn_count,
+            "Status": "Deleted" if asset.deleted_at else "Active",
+        })
+
+    assets_df = pd.DataFrame(assets_data) if assets_data else pd.DataFrame(columns=[
+        "Asset Name", "Asset Type", "Category", "Category Description",
+        "Serial Number Count", "Status",
+    ])
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        assets_df.to_excel(writer, sheet_name="Assets", index=False)
+        format_worksheet(writer.sheets["Assets"])
+
+    output.seek(0)
+
+    date_suffix = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"assets_export_{date_suffix}.xlsx"
+    temp_file_path = f"uploads/temp_{filename}"
+    os.makedirs("uploads", exist_ok=True)
+
+    with open(temp_file_path, "wb") as f:
+        f.write(output.getvalue())
+
+    return FileResponse(
+        path=temp_file_path,
+        filename=filename,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 
 @router.get("/", response_model=AssetListResponse)
@@ -47,14 +135,9 @@ async def get_assets(
         .options(*_asset_opts())
     )
 
-    if not include_deleted:
-        stmt = stmt.where(Asset.deleted_at.is_(None))
-
-    if category_id:
-        stmt = stmt.where(Asset.category_id == category_id)
-
-    if name:
-        stmt = stmt.where(Asset.asset_name.ilike(f"%{name}%"))
+    stmt = _apply_asset_filters(
+        stmt, category_id=category_id, name=name, include_deleted=include_deleted
+    )
 
     count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
     total = count_result.scalar()

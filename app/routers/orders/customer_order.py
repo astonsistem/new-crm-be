@@ -79,6 +79,8 @@ async def get_pending_payment_status(db: AsyncSession) -> Order_Status:
 async def get_paid_status(db: AsyncSession) -> Order_Status:
     return await _get_or_create_order_status(db, "paid", "Payment confirmed by sales")
 
+async def get_waiting_approval_status(db: AsyncSession) -> Order_Status:
+    return await _get_or_create_order_status(db, "waiting_approval", "Payment waiting for approval by sales")
 
 async def get_shipped_status(db: AsyncSession) -> Order_Status:
     return await _get_or_create_order_status(db, "shipped", "Items shipped with resi proof")
@@ -254,6 +256,7 @@ async def get_my_log(
                 joinedload(Order_Service.mou),
                 joinedload(Order_Service.status_service),
                 joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
+                joinedload(Order_Service.service_point),
                 joinedload(Order_Service.created_user),
                 joinedload(Order_Service.activity_logs).joinedload(Service_Activity_Log.user),
             ).where(Order_Service.mou_id.in_(mou_ids))

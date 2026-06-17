@@ -11,6 +11,9 @@ class Serial_Number(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     serial_code = Column(String(100), nullable=False, unique=True)
     asset_id = Column(UUID(as_uuid=True), ForeignKey("assets.id"), nullable=False)
-    status = Column(Enum("ACTIVE", "INACTIVE", "SERVICE", name="serial_number_status_enum"), nullable=False)
+    status = Column(
+        Enum("ACTIVE", "INACTIVE", "SERVICE", "BROKEN", name="serial_number_status_enum"),
+        nullable=False,
+    )
 
     asset = relationship("Asset")

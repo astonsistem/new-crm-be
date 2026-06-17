@@ -2,7 +2,9 @@ from pydantic import BaseModel, Field
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
+from decimal import Decimal
 
+from app.schemas.service_point import ServicePointBriefResponse
 from app.utils.datetime_utils import NaiveDatetime
 
 
@@ -86,6 +88,8 @@ class OrderServiceResponse(BaseModel):
     mou_device_id: UUID
     status_service_id: UUID
     description: Optional[str] = None
+    service_cost: Optional[Decimal] = None
+    service_point_id: Optional[UUID] = None
     service_date: Optional[datetime] = None
     service_date_description: Optional[str] = None
     completed_at: Optional[datetime] = None
@@ -97,6 +101,7 @@ class OrderServiceResponse(BaseModel):
     mou: MOUBasicResponse
     status_service: StatusServiceResponse
     mou_device: MOUDeviceDetailResponse
+    service_point: Optional[ServicePointBriefResponse] = None
     created_user: UserBasicResponse
     activity_logs: List[ServiceActivityLogResponse] = []
     
@@ -109,21 +114,33 @@ class OrderServiceCreate(BaseModel):
     mou_id: UUID
     mou_device_id: UUID
     description: Optional[str] = Field(None, max_length=512)
+    service_cost: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+    service_point_id: Optional[UUID] = None
 
 
 # Schedule Service Request (sales sets service date)
 class ServiceScheduleRequest(BaseModel):
     service_date: NaiveDatetime
     service_date_description: Optional[str] = Field(None, max_length=512)
+    service_cost: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+    service_point_id: Optional[UUID] = None
 
 
 # Process Service Request (sales starts processing service)
 class ServiceProcessRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=512)
+    service_cost: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+    service_point_id: Optional[UUID] = None
 
 
 # Complete Service Request (sales completes service)
 class ServiceCompleteRequest(BaseModel):
+    description: Optional[str] = Field(None, max_length=512)
+    service_cost: Optional[Decimal] = Field(None, ge=0, decimal_places=2)
+
+
+# Cancel Service Request
+class ServiceCancelRequest(BaseModel):
     description: Optional[str] = Field(None, max_length=512)
 
 

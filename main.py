@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import get_settings
 from app.core.logging import get_logger, setup_logging
 from app.middleware.logging_middleware import RequestLoggingMiddleware
-from app.utils.scheduler import start_scheduler, stop_scheduler
+from app.utils.scheduler import start_scheduler, stop_scheduler, run_mou_expiry_check
 from app.database import AsyncSessionLocal
 from app.services.asis_session import asis_session
 
@@ -32,6 +32,7 @@ from app.routers import (
     serial_number_router,
     region_router,
     expedition_router,
+    service_point_router,
     asis_config_router,
     asis_sync_router,
     asis_company_router,
@@ -84,6 +85,7 @@ async def _load_asis_config() -> None:
 async def lifespan(app: FastAPI):
     logger.info("Starting up %s v%s (debug=%s) …", settings.app_name, settings.api_version, settings.debug)
     start_scheduler()
+    await run_mou_expiry_check()
     await _load_asis_config()
     yield
     stop_scheduler()
@@ -260,6 +262,7 @@ app.include_router(bast_router)
 app.include_router(service_file_router)
 app.include_router(region_router)
 app.include_router(expedition_router)
+app.include_router(service_point_router)
 app.include_router(asis_config_router)
 app.include_router(asis_sync_router)
 app.include_router(asis_company_router)
@@ -270,9 +273,6 @@ app.include_router(asis_warehouse_router)
 
 os.makedirs("uploads", exist_ok=True)
 app.mount("/files", StaticFiles(directory="uploads"), name="files")
-
-# Tambahkan ini
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ─── Health endpoints ─────────────────────────────────────────────────────────
 

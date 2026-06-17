@@ -8,12 +8,16 @@ from sqlalchemy.orm import joinedload
 
 from app.models.order import Order_Customer, Order_Customer_Detail, Order_Activity_Log
 from app.models.mou import MOU_Product
+from app.models.customer import Customer
 
 
 def order_customer_load_options():
     return [
         joinedload(Order_Customer.mou),
-        joinedload(Order_Customer.customer),
+        joinedload(Order_Customer.customer).joinedload(Customer.province),
+        joinedload(Order_Customer.customer).joinedload(Customer.district),
+        joinedload(Order_Customer.customer).joinedload(Customer.region),
+        joinedload(Order_Customer.customer).joinedload(Customer.sales_user),
         joinedload(Order_Customer.status),
         joinedload(Order_Customer.payment_confirmer),
         joinedload(Order_Customer.shipping_confirmer),

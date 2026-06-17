@@ -8,6 +8,7 @@ from app.dependencies import get_db
 from app.models import User
 from app.models.serial_number import Serial_Number
 from app.models.asset import Asset
+from app.models.mou import MOU, MOU_Device
 from app.schemas.serial_number import (
     SerialNumberCreate, 
     SerialNumberUpdate, 
@@ -36,7 +37,7 @@ async def get_serial_numbers(
     - **limit**: Maximum number of records to return
     - **asset_id**: Filter by asset ID (optional)
     - **serial_code**: Filter by serial code, partial match (optional)
-    - **status**: Filter by status (ACTIVE, INACTIVE, SERVICE) (optional)
+    - **status**: Filter by status (ACTIVE, INACTIVE, SERVICE, BROKEN) (optional)
     """
     stmt = select(Serial_Number).options(joinedload(Serial_Number.asset))
 
@@ -113,8 +114,9 @@ async def create_serial_number(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Serial number with code {serial_number.serial_code} already exists"
         )
-
-    db_serial_number = Serial_Number(**serial_number.model_dump(), status="INACTIVE")
+    serial_status = serial_number.status.value
+    payload = serial_number.model_dump(exclude={"status"})
+    db_serial_number = Serial_Number(**payload, status=serial_status)
     db.add(db_serial_number)
     await db.commit()
     await db.refresh(db_serial_number)
@@ -175,6 +177,8 @@ async def update_serial_number(
             )
 
     update_data = serial_number.model_dump(exclude_unset=True)
+    if "status" in update_data and update_data["status"] is not None:
+        update_data["status"] = update_data["status"].value
     for key, value in update_data.items():
         setattr(db_serial_number, key, value)
 
@@ -208,6 +212,24 @@ async def delete_serial_number(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Serial number with id {serial_number_id} not found"
+        )
+
+    mou_numbers = (await db.execute(
+        select(MOU.no_mou)
+        .join(MOU_Device, MOU_Device.mou_id == MOU.id)
+        .where(MOU_Device.serial_number_id == serial_number_id)
+        .order_by(MOU.no_mou)
+    )).scalars().all()
+
+    if mou_numbers:
+        mou_list = ", ".join(mou_numbers)
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot delete serial number '{db_serial_number.serial_code}' because it is "
+                f"still assigned to MOU device(s). Remove the device assignment from "
+                f"MOU: {mou_list} first."
+            ),
         )
 
     await db.delete(db_serial_number)

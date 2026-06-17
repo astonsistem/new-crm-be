@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, aliased
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
@@ -40,6 +40,44 @@ class OrderListResponse(BaseModel):
 router = APIRouter(prefix="/orders/sales", tags=["Sales Orders"])
 
 
+def _normalize_customer_type(raw) -> str:
+    if raw is None:
+        return "N/A"
+    return raw.value if hasattr(raw, "value") else str(raw)
+
+
+def _export_region_name(
+    *,
+    region_name: str | None,
+    customer_name: str,
+    customer_type: str,
+) -> str:
+    """Region = name from customers.region_id; REGION type uses own customer name."""
+    if region_name:
+        return region_name
+    if customer_type == "REGION":
+        return customer_name
+    return ""
+
+
+def _unpack_export_customer_row(row) -> dict:
+    customer_name = row[1] or ""
+    customer_type = _normalize_customer_type(row[2])
+    return {
+        "customer_name": customer_name,
+        "customer_type": customer_type,
+        "customer_pic": row[3],
+        "customer_pic_phone": row[4],
+        "customer_phone": row[5],
+        "sales_name": row[6] or "",
+        "region_name": _export_region_name(
+            region_name=row[7],
+            customer_name=customer_name,
+            customer_type=customer_type,
+        ),
+    }
+
+
 async def _get_or_create_order_status(db: AsyncSession, name: str, description: str) -> Order_Status:
     order_status = await fetch_first(
         db, select(Order_Status).where(Order_Status.name == name)
@@ -54,6 +92,8 @@ async def _get_or_create_order_status(db: AsyncSession, name: str, description: 
 async def get_paid_status(db: AsyncSession) -> Order_Status:
     return await _get_or_create_order_status(db, "paid", "Payment confirmed by sales")
 
+async def get_waiting_approval_status(db: AsyncSession) -> Order_Status:
+    return await _get_or_create_order_status(db, "waiting_approval", "Payment waiting for approval by sales")
 
 async def get_shipped_status(db: AsyncSession) -> Order_Status:
     """Get the shipped status, create if not exists"""
@@ -206,7 +246,10 @@ async def get_sales_order_log(
     rows_stmt = select(
         Order_Customer,
         Customer.name.label('customer_name'),
-        Customer.type.label('customer_type')
+        Customer.type.label('customer_type'),
+        Customer.PIC.label('customer_pic'),
+        Customer.pic_phone.label('customer_pic_phone'),
+        Customer.phone.label('customer_phone'),
     ).options(
         joinedload(Order_Customer.order_details).joinedload(Order_Customer_Detail.mou_product).joinedload(MOU_Product.product)
     ).join(Customer, Order_Customer.customer_id == Customer.id).where(*base_conditions)
@@ -220,7 +263,10 @@ async def get_sales_order_log(
         order = row[0]
         customer_name = row[1]
         customer_type = row[2]
-        
+        customer_pic = row[3]
+        customer_pic_phone = row[4]
+        customer_phone = row[5]
+
         log_items.append(SalesOrderLogItem(
             id=order.id,
             order_number=order.order_number,
@@ -229,6 +275,9 @@ async def get_sales_order_log(
             total=order.total,
             customer_name=customer_name,
             customer_type=customer_type,
+            customer_pic=customer_pic,
+            customer_pic_phone=customer_pic_phone,
+            customer_phone=customer_phone,
             order_details=order.order_details
         ))
     
@@ -272,17 +321,25 @@ async def export_sales_order_log(
         )
     
     excel_data = []
-    
+    RegionCustomer = aliased(Customer, name="region_customer")
+
     if include_orders:
         orders_stmt = select(
             Order_Customer,
-            Customer.name.label('customer_name'),
-            Customer.type.label('customer_type')
+            Customer.name.label("customer_name"),
+            Customer.type.label("customer_type"),
+            Customer.PIC.label("customer_pic"),
+            Customer.pic_phone.label("customer_pic_phone"),
+            Customer.phone.label("customer_phone"),
+            User.name.label("sales_name"),
+            RegionCustomer.name.label("region_name"),
         ).options(
             joinedload(Order_Customer.mou),
             joinedload(Order_Customer.status),
-            joinedload(Order_Customer.order_details).joinedload(Order_Customer_Detail.mou_product).joinedload(MOU_Product.product)
-        ).join(Customer, Order_Customer.customer_id == Customer.id)
+            joinedload(Order_Customer.order_details).joinedload(Order_Customer_Detail.mou_product).joinedload(MOU_Product.product),
+        ).join(Customer, Order_Customer.customer_id == Customer.id
+        ).outerjoin(User, Customer.sales_id == User.id
+        ).outerjoin(RegionCustomer, Customer.region_id == RegionCustomer.id)
         
         if sales_id:
             orders_stmt = orders_stmt.where(Customer.sales_id == sales_id)
@@ -304,9 +361,8 @@ async def export_sales_order_log(
         
         for row in order_rows:
             order = row[0]
-            customer_name = row[1]
-            customer_type = row[2]
-            
+            fields = _unpack_export_customer_row(row)
+
             if not order.order_details:
                 excel_data.append({
                     'Type': 'Order',
@@ -314,8 +370,13 @@ async def export_sales_order_log(
                     'Date': order.order_date.strftime('%Y-%m-%d'),
                     'Completion Date': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else '',
                     'Status': order.status.name if order.status else 'N/A',
-                    'Customer Name': customer_name,
-                    'Customer Type': customer_type,
+                    'Region': fields["region_name"],
+                    'Customer Name': fields["customer_name"],
+                    'Customer Type': fields["customer_type"],
+                    'Customer PIC': fields["customer_pic"] or '',
+                    'Customer PIC Phone': fields["customer_pic_phone"] or '',
+                    'Customer Phone': fields["customer_phone"] or '',
+                    'Sales': fields["sales_name"],
                     'MOU Number': order.mou.no_mou if order.mou else 'N/A',
                     'Product/Device': 'N/A',
                     'Quantity': 0,
@@ -332,8 +393,13 @@ async def export_sales_order_log(
                         'Date': order.order_date.strftime('%Y-%m-%d'),
                         'Completion Date': order.completed_at.strftime('%Y-%m-%d') if order.completed_at else '',
                         'Status': order.status.name if order.status else 'N/A',
-                        'Customer Name': customer_name,
-                        'Customer Type': customer_type,
+                        'Region': fields["region_name"],
+                        'Customer Name': fields["customer_name"],
+                        'Customer Type': fields["customer_type"],
+                        'Customer PIC': fields["customer_pic"] or '',
+                        'Customer PIC Phone': fields["customer_pic_phone"] or '',
+                        'Customer Phone': fields["customer_phone"] or '',
+                        'Sales': fields["sales_name"],
                         'MOU Number': order.mou.no_mou if order.mou else 'N/A',
                         'Product/Device': detail.mou_product.product.product_name,
                         'Quantity': detail.quantity,
@@ -363,14 +429,22 @@ async def export_sales_order_log(
             if mou_ids:
                 services_stmt = select(
                     Order_Service,
-                    Customer.name.label('customer_name'),
-                    Customer.type.label('customer_type')
+                    Customer.name.label("customer_name"),
+                    Customer.type.label("customer_type"),
+                    Customer.PIC.label("customer_pic"),
+                    Customer.pic_phone.label("customer_pic_phone"),
+                    Customer.phone.label("customer_phone"),
+                    User.name.label("sales_name"),
+                    RegionCustomer.name.label("region_name"),
                 ).options(
                     joinedload(Order_Service.mou),
                     joinedload(Order_Service.status_service),
-                    joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset)
+                    joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
+                    joinedload(Order_Service.service_point),
                 ).join(MOU, Order_Service.mou_id == MOU.id
                 ).join(Customer, MOU.customer_id == Customer.id
+                ).outerjoin(User, Customer.sales_id == User.id
+                ).outerjoin(RegionCustomer, Customer.region_id == RegionCustomer.id
                 ).where(Order_Service.mou_id.in_(mou_ids))
                 
                 if start_date:
@@ -380,13 +454,12 @@ async def export_sales_order_log(
                 
                 service_rows = (await db.execute(
                     services_stmt.order_by(Order_Service.created_at.desc())
-                )).all()
+                )).unique().all()
                 
                 for row in service_rows:
                     service = row[0]
-                    customer_name = row[1]
-                    customer_type = row[2]
-                    
+                    fields = _unpack_export_customer_row(row)
+
                     device_info = "N/A"
                     if service.mou_device and service.mou_device.serial_number:
                         device_info = f"{service.mou_device.serial_number.asset.asset_name} - {service.mou_device.serial_number.serial_code}"
@@ -397,14 +470,20 @@ async def export_sales_order_log(
                         'Date': service.created_at.strftime('%Y-%m-%d'),
                         'Completion Date': '',
                         'Status': service.status_service.name if service.status_service else 'N/A',
-                        'Customer Name': customer_name,
-                        'Customer Type': customer_type,
+                        'Region': fields["region_name"],
+                        'Customer Name': fields["customer_name"],
+                        'Customer Type': fields["customer_type"],
+                        'Customer PIC': fields["customer_pic"] or '',
+                        'Customer PIC Phone': fields["customer_pic_phone"] or '',
+                        'Customer Phone': fields["customer_phone"] or '',
+                        'Sales': fields["sales_name"],
+                        'Service Point': service.service_point.name if service.service_point else 'N/A',
                         'MOU Number': service.mou.no_mou if service.mou else 'N/A',
                         'Product/Device': device_info,
                         'Quantity': 1,
-                        'Unit Price': 0,
-                        'Subtotal': 0,
-                        'Total': 0,
+                        'Unit Price': float(service.service_cost) if service.service_cost is not None else 0,
+                        'Subtotal': float(service.service_cost) if service.service_cost is not None else 0,
+                        'Total': float(service.service_cost) if service.service_cost is not None else 0,
                         'Description': service.description or 'Service request'
                     })
     
@@ -533,34 +612,76 @@ async def get_sales_performance_overview(
         overall_revenue=overall_revenue
     )
 
+# Waiting approval payment (Customer and Sales)
+@router.put("/{order_id}/waiting-approval-payment", response_model=OrderCustomerResponse)
+async def waiting_approval_payment(
+    order_id: UUID,
+    current_user: User = Depends(require_permission(Permission.CREATE_ORDER)),
+    db: AsyncSession = Depends(get_db)
+):
+    """Set order status to waiting approval payment (Customer and Sales access)."""
+    if current_user.customer_id:
+        order = (await db.execute(
+            select(Order_Customer).where(
+                Order_Customer.id == order_id,
+                Order_Customer.customer_id == current_user.customer_id,
+            )
+        )).scalar_one_or_none()
+    else:
+        order = (await db.execute(
+            select(Order_Customer).where(Order_Customer.id == order_id)
+        )).scalar_one_or_none()
 
-# Confirm payment (Sales only)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order not found"
+        )
+    
+    waiting_approval_status = await get_waiting_approval_status(db)
+
+    order.status_id = waiting_approval_status.id
+
+    db.add(Order_Activity_Log(
+        order_id=order_id,
+        status="waiting_approval_payment",
+        description="Pembayaran menunggu persetujuan sales",
+        created_by=current_user.id,
+    ))
+    await db.commit()
+    
+    order = await fetch_order_customer(db, order_id)
+    
+    return order
+
+# Confirm payment (Customer and Sales)
 @router.put("/{order_id}/confirm-payment", response_model=OrderCustomerResponse)
 async def confirm_payment(
     order_id: UUID,
     confirm_data: ConfirmPaymentRequest,
-    current_user: User = Depends(require_permission(Permission.UPDATE_ORDER)),
+    current_user: User = Depends(require_permission(Permission.CREATE_ORDER)),
     db: AsyncSession = Depends(get_db)
 ):
-    """Confirm payment for an order (Sales only)
-    
-    Sales can confirm payment with or without customer uploading payment proofs.
-    This supports both regular payments and free/promotional orders.
+    """Confirm payment for an order (Customer and Sales access).
+
+    Supports both regular payments and free/promotional orders.
     """
-    
-    order = (await db.execute(
-        select(Order_Customer)
-        .join(Customer, Order_Customer.customer_id == Customer.id)
-        .where(
-            Order_Customer.id == order_id,
-            Customer.sales_id == current_user.id
-        )
-    )).scalar_one_or_none()
-    
+    if current_user.customer_id:
+        order = (await db.execute(
+            select(Order_Customer).where(
+                Order_Customer.id == order_id,
+                Order_Customer.customer_id == current_user.customer_id,
+            )
+        )).scalar_one_or_none()
+    else:
+        order = (await db.execute(
+            select(Order_Customer).where(Order_Customer.id == order_id)
+        )).scalar_one_or_none()
+
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found or not from your customers"
+            detail="Order not found"
         )
     
     paid_status = await get_paid_status(db)

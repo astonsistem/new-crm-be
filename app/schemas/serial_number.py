@@ -8,6 +8,7 @@ class SerialNumberStatus(str, Enum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
     SERVICE = "SERVICE"
+    BROKEN = "BROKEN"
 
 
 class AssetDetailResponse(BaseModel):
@@ -28,6 +29,7 @@ class SerialNumberBase(BaseModel):
 class SerialNumberCreate(BaseModel):
     serial_code: str = Field(..., max_length=100)
     asset_id: UUID
+    status: SerialNumberStatus = SerialNumberStatus.ACTIVE
 
 
 class SerialNumberUpdate(BaseModel):

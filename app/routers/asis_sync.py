@@ -9,9 +9,9 @@ CRUD data yang sudah tersimpan di CRM ada di router terpisah:
   /asis-warehouses
 """
 
-from typing import Any, List
+from typing import Any, Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,8 +21,10 @@ from app.models import User
 from app.models.asis_sync import AsisBranch, AsisCompany, AsisWarehouse
 from app.schemas.asis_sync import (
     AsisBranchPreview,
+    AsisBranchPreviewListResponse,
     AsisCompanyPreview,
     AsisWarehousePreview,
+    AsisWarehousePreviewListResponse,
     SyncResult,
 )
 from app.services.asis_session import asis_session
@@ -57,6 +59,68 @@ def _safe(d: dict, *keys: str, default: Any = None) -> Any:
             return default
         d = d.get(k, default)
     return d
+
+
+def _build_branch_asis_params(
+    filter: Optional[str] = None,
+    name: Optional[str] = None,
+) -> dict:
+    """Query params filter branch — diteruskan ke ASIS API."""
+    params: dict = {}
+    if filter:
+        params["filter"] = filter
+    if name:
+        params["name"] = name
+    return params
+
+
+def _build_warehouse_asis_params(
+    branch_id: Optional[str] = None,
+    name: Optional[str] = None,
+    is_kongsi: Optional[bool] = None,
+    is_kongsi_vendor: Optional[bool] = None,
+) -> dict:
+    """Query params filter warehouse — diteruskan ke ASIS API."""
+    params: dict = {}
+    if name:
+        params["name"] = name
+    if branch_id:
+        params["branch_id"] = branch_id
+    if is_kongsi is not None:
+        params["is_kongsi"] = is_kongsi
+    if is_kongsi_vendor is not None:
+        params["is_kongsi_vendor"] = is_kongsi_vendor
+    return params
+
+
+def _to_branch_preview(item: dict, existing_ids: set[str]) -> AsisBranchPreview:
+    return AsisBranchPreview(
+        asis_id=str(item.get("id", "")),
+        asis_code=str(item.get("branchCode", "")),
+        name=str(item.get("name", "")),
+        address=item.get("address"),
+        telp=item.get("telp"),
+        initial=item.get("initial"),
+        pic_name=item.get("picName"),
+        pic_email=item.get("picEmail"),
+        status=bool(item.get("status", True)),
+        already_synced=str(item.get("id", "")) in existing_ids,
+    )
+
+
+def _to_warehouse_preview(item: dict, existing_ids: set[str]) -> AsisWarehousePreview:
+    return AsisWarehousePreview(
+        asis_id=str(item.get("id", "")),
+        asis_code=str(item.get("warehouse_code", "") or item.get("warehouseCode", "")),
+        name=str(item.get("name", "")),
+        location=item.get("location"),
+        pic_name=item.get("picName"),
+        pic_email=item.get("picEmail"),
+        status=bool(item.get("status", True)),
+        is_kongsi=bool(item.get("is_kongsi", False)),
+        is_kongsi_vendor=bool(item.get("is_kongsi_vendor", False)),
+        already_synced=str(item.get("id", "")) in existing_ids,
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -156,39 +220,34 @@ async def sync_company(
 # BRANCH SYNC
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/branch/preview", response_model=List[AsisBranchPreview])
+@router.get("/branch/preview", response_model=AsisBranchPreviewListResponse)
 async def preview_branches(
+    filter: Optional[str] = Query(None, description="Filter nama branch (diteruskan ke ASIS)"),
+    name: Optional[str] = Query(None, description="Filter nama branch (diteruskan ke ASIS)"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Ambil semua branch dari ASIS tanpa menyimpan ke CRM."""
-    raw_items = await _fetch_all_pages("/asis/company/branch/all")
+    """Ambil branch dari ASIS tanpa menyimpan ke CRM."""
+    asis_params = _build_branch_asis_params(filter=filter, name=name)
+    raw_items = await _fetch_all_pages("/asis/company/branch/all", asis_params)
     existing_ids = set((await db.execute(select(AsisBranch.asis_id))).scalars().all())
 
-    return [
-        AsisBranchPreview(
-            asis_id=str(item.get("id", "")),
-            asis_code=str(item.get("branchCode", "")),
-            name=str(item.get("name", "")),
-            address=item.get("address"),
-            telp=item.get("telp"),
-            initial=item.get("initial"),
-            pic_name=item.get("picName"),
-            pic_email=item.get("picEmail"),
-            status=bool(item.get("status", True)),
-            already_synced=str(item.get("id", "")) in existing_ids,
-        )
-        for item in raw_items
-    ]
+    return AsisBranchPreviewListResponse(
+        data=[_to_branch_preview(item, existing_ids) for item in raw_items],
+        total=len(raw_items),
+    )
 
 
 @router.post("/branch/sync", response_model=SyncResult)
 async def sync_branches(
+    filter: Optional[str] = Query(None, description="Filter nama branch (diteruskan ke ASIS)"),
+    name: Optional[str] = Query(None, description="Filter nama branch (diteruskan ke ASIS)"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Sinkronisasi semua branch dari ASIS ke CRM."""
-    raw_items = await _fetch_all_pages("/asis/company/branch/all")
+    """Sinkronisasi branch dari ASIS ke CRM."""
+    asis_params = _build_branch_asis_params(filter=filter, name=name)
+    raw_items = await _fetch_all_pages("/asis/company/branch/all", asis_params)
 
     existing_by_id: dict[str, AsisBranch] = {
         r.asis_id: r for r in (await db.execute(select(AsisBranch))).scalars().all()
@@ -252,39 +311,48 @@ async def sync_branches(
 # WAREHOUSE SYNC
 # ══════════════════════════════════════════════════════════════════════════════
 
-@router.get("/warehouse/preview", response_model=List[AsisWarehousePreview])
+@router.get("/warehouse/preview", response_model=AsisWarehousePreviewListResponse)
 async def preview_warehouses(
+    branch_id: Optional[str] = Query(None, description="Filter branch ASIS ID (diteruskan ke ASIS)"),
+    name: Optional[str] = Query(None, description="Filter nama warehouse (diteruskan ke ASIS)"),
+    is_kongsi: Optional[bool] = Query(None, description="Filter gudang kongsi"),
+    is_kongsi_vendor: Optional[bool] = Query(None, description="Filter gudang kongsi vendor"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Ambil semua warehouse dari ASIS tanpa menyimpan ke CRM."""
-    raw_items = await _fetch_all_pages("/asis/company/warehouse")
+    """Ambil warehouse dari ASIS tanpa menyimpan ke CRM."""
+    asis_params = _build_warehouse_asis_params(
+        branch_id=branch_id,
+        name=name,
+        is_kongsi=is_kongsi,
+        is_kongsi_vendor=is_kongsi_vendor,
+    )
+    raw_items = await _fetch_all_pages("/asis/company/warehouse", asis_params)
     existing_ids = set((await db.execute(select(AsisWarehouse.asis_id))).scalars().all())
 
-    return [
-        AsisWarehousePreview(
-            asis_id=str(item.get("id", "")),
-            asis_code=str(item.get("warehouse_code", "") or item.get("warehouseCode", "")),
-            name=str(item.get("name", "")),
-            location=item.get("location"),
-            pic_name=item.get("picName"),
-            pic_email=item.get("picEmail"),
-            status=bool(item.get("status", True)),
-            is_kongsi=bool(item.get("is_kongsi", False)),
-            is_kongsi_vendor=bool(item.get("is_kongsi_vendor", False)),
-            already_synced=str(item.get("id", "")) in existing_ids,
-        )
-        for item in raw_items
-    ]
+    return AsisWarehousePreviewListResponse(
+        data=[_to_warehouse_preview(item, existing_ids) for item in raw_items],
+        total=len(raw_items),
+    )
 
 
 @router.post("/warehouse/sync", response_model=SyncResult)
 async def sync_warehouses(
+    branch_id: Optional[str] = Query(None, description="Filter branch ASIS ID (diteruskan ke ASIS)"),
+    name: Optional[str] = Query(None, description="Filter nama warehouse (diteruskan ke ASIS)"),
+    is_kongsi: Optional[bool] = Query(None, description="Filter gudang kongsi"),
+    is_kongsi_vendor: Optional[bool] = Query(None, description="Filter gudang kongsi vendor"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Sinkronisasi semua warehouse dari ASIS ke CRM."""
-    raw_items = await _fetch_all_pages("/asis/company/warehouse")
+    """Sinkronisasi warehouse dari ASIS ke CRM."""
+    asis_params = _build_warehouse_asis_params(
+        branch_id=branch_id,
+        name=name,
+        is_kongsi=is_kongsi,
+        is_kongsi_vendor=is_kongsi_vendor,
+    )
+    raw_items = await _fetch_all_pages("/asis/company/warehouse", asis_params)
 
     existing_by_id: dict[str, AsisWarehouse] = {
         r.asis_id: r for r in (await db.execute(select(AsisWarehouse))).scalars().all()

@@ -29,6 +29,7 @@ class AccessTokenResponse(BaseModel):
 class UserBase(BaseModel):
     name: str
     username: str
+    phone: Optional[str] = Field(None, max_length=50)
 
 
 class UserCreate(UserBase):
@@ -50,6 +51,7 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     name: Optional[str] = None
     username: Optional[str] = None
+    phone: Optional[str] = Field(None, max_length=50)
     password: Optional[str] = Field(None, min_length=6)
     role_id: Optional[UUID] = None
     is_active: Optional[bool] = None
@@ -79,6 +81,7 @@ class CustomerDetail(BaseModel):
     name: Optional[str] = None
     type: Optional[str] = None
     PIC: Optional[str] = None
+    pic_phone: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None

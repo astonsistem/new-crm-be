@@ -15,6 +15,7 @@ class ProvinceInfo(BaseModel):
 class SalesInfo(BaseModel):
     id: UUID
     name: str
+    phone: Optional[str] = None
     
     class Config:
         from_attributes = True
@@ -30,11 +31,19 @@ class DistrictInfo(BaseModel):
 class CustomerBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     PIC: Optional[str] = Field(None, max_length=100, description="Person in Charge")
-    email: Optional[EmailStr] = None
+    pic_phone: Optional[str] = Field(None, max_length=20, description="PIC phone number")
+    email: Optional[EmailStr] = Field(None, description="Email address (optional)")
     phone: Optional[str] = Field(None, max_length=20)
     address: Optional[str] = Field(None, max_length=512)
     province_id: Optional[UUID] = Field(None, description="Province ID")
     district_id: Optional[UUID] = Field(None, description="District ID")
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_optional_email(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return v
 
 
 class CustomerCreate(CustomerBase):
@@ -72,7 +81,8 @@ class CustomerCreate(CustomerBase):
 class CustomerUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     PIC: Optional[str] = Field(None, max_length=100, description="Person in Charge")
-    email: Optional[EmailStr] = None
+    pic_phone: Optional[str] = Field(None, max_length=20, description="PIC phone number")
+    email: Optional[EmailStr] = Field(None, description="Email address (optional)")
     phone: Optional[str] = Field(None, max_length=20)
     address: Optional[str] = Field(None, max_length=512)
     type: Optional[Literal["COMPANY", "REGION", "BRANCH"]] = None
@@ -81,6 +91,13 @@ class CustomerUpdate(BaseModel):
     sales: Optional[SalesInfo] = None
     province: Optional[ProvinceInfo] = None
     district: Optional[DistrictInfo] = None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_optional_email(cls, v):
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        return v
 
 
 class CustomerResponse(CustomerBase):
@@ -93,6 +110,7 @@ class CustomerResponse(CustomerBase):
     sales: Optional[SalesInfo] = None
     province: Optional[ProvinceInfo] = None
     district: Optional[DistrictInfo] = None
+    username: Optional[str] = Field(None, description="Login username of linked customer user, if any")
 
     class Config:
         from_attributes = True
@@ -107,7 +125,8 @@ class CustomerResponse(CustomerBase):
                 **{k: v for k, v in customer.__dict__.items() if not k.startswith('_')},
                 'sales': {
                     'id': customer.sales_user.id,
-                    'name': customer.sales_user.name
+                    'name': customer.sales_user.name,
+                    'phone': customer.sales_user.phone,
                 } if customer.sales_user else None
             }
             return super().model_validate(customer_dict)
@@ -138,7 +157,8 @@ class CustomerDetailResponse(CustomerBase):
                 **{k: v for k, v in customer.__dict__.items() if not k.startswith('_')},
                 'sales': {
                     'id': customer.sales_user.id,
-                    'name': customer.sales_user.name
+                    'name': customer.sales_user.name,
+                    'phone': customer.sales_user.phone,
                 } if customer.sales_user else None
             }
             return super().model_validate(customer_dict)

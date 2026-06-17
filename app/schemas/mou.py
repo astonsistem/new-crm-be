@@ -21,6 +21,7 @@ class CustomerDetail(BaseModel):
     type: Optional[str] = None
     name: str
     PIC: Optional[str] = None
+    pic_phone: Optional[str] = None
     email: Optional[str] = None
     phone: Optional[str] = None
     address: Optional[str] = None
@@ -70,6 +71,16 @@ class MOUResponse(MOUBase):
         from_attributes = True
 
 
+class MOURenewRequest(BaseModel):
+    start_date: NaiveDatetime = Field(..., description="Start date for the renewed MOU")
+    end_date: NaiveDatetime = Field(..., description="End date for the renewed MOU")
+
+
+class MOURenewResponse(BaseModel):
+    old_mou: MOUResponse
+    new_mou: MOUResponse
+
+
 
 class ProductDetail(BaseModel):
     id: UUID
@@ -108,6 +119,9 @@ class MOUProductResponse(MOUProductBase):
     product: Optional[ProductDetail] = None
     customer_id: Optional[UUID] = None
     customer_name: Optional[str] = None
+    customer_pic: Optional[str] = None
+    customer_pic_phone: Optional[str] = None
+    customer_phone: Optional[str] = None
 
     class Config:
         from_attributes = True

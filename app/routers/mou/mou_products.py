@@ -57,6 +57,9 @@ async def get_all_mou_products(
         if product.mou and product.mou.customer:
             item.customer_id = product.mou.customer_id
             item.customer_name = product.mou.customer.name
+            item.customer_pic = product.mou.customer.PIC
+            item.customer_pic_phone = product.mou.customer.pic_phone
+            item.customer_phone = product.mou.customer.phone
         result.append(item)
 
     return MOUProductListResponse(data=result, total=total)
@@ -106,6 +109,9 @@ async def get_mou_products(
         if product.mou and product.mou.customer:
             item.customer_id = product.mou.customer_id
             item.customer_name = product.mou.customer.name
+            item.customer_pic = product.mou.customer.PIC
+            item.customer_pic_phone = product.mou.customer.pic_phone
+            item.customer_phone = product.mou.customer.phone
         result.append(item)
 
     return MOUProductListResponse(data=result, total=total)
@@ -207,13 +213,13 @@ async def add_product_to_mou(
 # Update MOU product
 @router.put("/{mou_product_id}", response_model=MOUProductResponse)
 async def update_mou_product(
-    product_id: UUID,
+    mou_product_id: UUID,
     product_data: MOUProductUpdate,
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     mou_product = (await db.execute(
-        select(MOU_Product).where(MOU_Product.id == product_id)
+        select(MOU_Product).where(MOU_Product.id == mou_product_id)
     )).scalar_one_or_none()
 
     if not mou_product:
@@ -231,7 +237,7 @@ async def update_mou_product(
 
     # Re-query with eager loading — db.refresh() strips loaded relationships
     mou_product = (await db.execute(
-        select(MOU_Product).options(*mou_product_load_options()).where(MOU_Product.id == product_id)
+        select(MOU_Product).options(*mou_product_load_options()).where(MOU_Product.id == mou_product_id)
     )).scalar_one()
 
     return mou_product

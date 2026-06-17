@@ -29,7 +29,10 @@ class MOUBasicResponse(BaseModel):
     no_mou: str
     customer_id: Optional[UUID] = None
     customer_name: Optional[str] = None
-    
+    customer_pic: Optional[str] = None
+    customer_pic_phone: Optional[str] = None
+    customer_phone: Optional[str] = None
+
     class Config:
         from_attributes = True
 

@@ -58,7 +58,8 @@ async def get_customers(
             (Customer.email.ilike(search_pattern)) |
             (Customer.phone.ilike(search_pattern)) |
             (Customer.address.ilike(search_pattern)) |
-            (Customer.PIC.ilike(search_pattern))
+            (Customer.PIC.ilike(search_pattern)) |
+            (Customer.pic_phone.ilike(search_pattern))
         )
 
     if email:
@@ -141,7 +142,8 @@ async def get_my_customers(
             (Customer.email.ilike(search_pattern)) |
             (Customer.phone.ilike(search_pattern)) |
             (Customer.address.ilike(search_pattern)) |
-            (Customer.PIC.ilike(search_pattern))
+            (Customer.PIC.ilike(search_pattern)) |
+            (Customer.pic_phone.ilike(search_pattern))
         )
 
     if email:
@@ -206,7 +208,15 @@ async def get_customer(
             detail="Customer not found"
         )
 
-    return CustomerResponse.model_validate(customer)
+    username = (await db.execute(
+        select(User.username).where(
+            User.customer_id == customer_id,
+            User.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+
+    response = CustomerResponse.model_validate(customer)
+    return response.model_copy(update={"username": username})
 
 
 # Create new customer
@@ -328,6 +338,7 @@ async def create_customer(
         type=customer_data.type,
         name=customer_data.name,
         PIC=customer_data.PIC,
+        pic_phone=customer_data.pic_phone,
         email=customer_data.email,
         phone=customer_data.phone,
         address=customer_data.address,

@@ -11,8 +11,14 @@ from app.models.mou import MOU
 from app.models.status import Status_MOU
 from app.models.customer import Customer
 from app.models.order import Order_Customer, Order_Service
-from app.schemas.mou import MOUCreate, MOUUpdate, MOUResponse
+from app.schemas.mou import MOUCreate, MOUUpdate, MOUResponse, MOURenewRequest, MOURenewResponse
 from app.routers.mou.mou_files import read_contract_file_base64
+from app.routers.mou.mou_helpers import (
+    close_expired_mou,
+    fetch_active_mou,
+    get_status_mou_id,
+    renew_expired_mou,
+)
 from app.utils.eager_loads import mou_load_options
 from app.utils.db_queries import fetch_first, fetch_scalar_first, row_exists
 import re
@@ -242,6 +248,36 @@ async def get_my_created_mous(
     return MOUListResponse(data=mous, total=total)
 
 
+@router.get("/expired", response_model=MOUListResponse)
+async def get_expired_mous(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=200),
+    customer_id: Optional[UUID] = Query(None, description="Filter by customer ID"),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List MOUs that have passed end_date and are still ACTIVE (awaiting renewal decision)."""
+    active_status_id = await get_status_mou_id(db, "ACTIVE")
+    conditions = [
+        MOU.deleted_at.is_(None),
+        MOU.status_mou_id == active_status_id,
+        MOU.end_date < datetime.now(),
+    ]
+    if customer_id:
+        conditions.append(MOU.customer_id == customer_id)
+
+    total = (await db.execute(
+        select(func.count(MOU.id)).where(*conditions)
+    )).scalar()
+
+    mous = (await db.execute(
+        select(MOU).options(*mou_load_options()).where(*conditions)
+        .order_by(MOU.end_date.desc()).offset(skip).limit(limit)
+    )).scalars().all()
+
+    return MOUListResponse(data=mous, total=total)
+
+
 # Get MOU by ID
 @router.get("/{mou_id}", response_model=MOUResponse)
 async def get_mou(
@@ -349,6 +385,47 @@ async def create_mou(
     )).scalar_one_or_none()
 
     return mou_with_relations
+
+
+@router.put("/{mou_id}/renew", response_model=MOURenewResponse)
+async def renew_mou(
+    mou_id: UUID,
+    renew_data: MOURenewRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Renew an expired MOU.
+
+    Creates a new ACTIVE MOU with a new ID and MOU number, copies products/devices/contract,
+    and marks the old MOU as INACTIVE.
+    """
+    mou = await fetch_active_mou(db, mou_id)
+    old_mou, new_mou = await renew_expired_mou(
+        db,
+        mou,
+        start_date=renew_data.start_date,
+        end_date=renew_data.end_date,
+        created_by=current_user.id,
+        generate_mou_number=generate_mou_number,
+    )
+    return MOURenewResponse(old_mou=old_mou, new_mou=new_mou)
+
+
+@router.put("/{mou_id}/close", response_model=MOUResponse)
+async def close_mou(
+    mou_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Close an expired MOU without renewal.
+
+    Sets the MOU status to INACTIVE when end_date has passed.
+    """
+    mou = await fetch_active_mou(db, mou_id)
+    closed_mou = await close_expired_mou(db, mou)
+    return closed_mou
 
 
 # Update MOU
