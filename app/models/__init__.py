@@ -8,6 +8,7 @@ from app.models.order import Order_Customer, Order_Customer_Detail, Order_Servic
 from app.models.serial_number import Serial_Number
 from app.models.region import Province, District
 from app.models.expedition import Expedition
+from app.models.service_point import Service_Point
 from app.models.asis_config import AsisConfig
 from app.models.asis_sync import AsisCompany, AsisBranch, AsisWarehouse
 
@@ -34,6 +35,7 @@ __all__ = [
     "Province",
     "District",
     "Expedition",
+    "Service_Point",
     "AsisConfig",
     "AsisCompany",
     "AsisBranch",

@@ -12,6 +12,7 @@ from app.routers.serial_number import router as serial_number_router
 from app.routers.orders.service import router as order_service_router
 from app.routers.region import router as region_router
 from app.routers.expedition import router as expedition_router
+from app.routers.service_point import router as service_point_router
 from app.routers.asis_config import router as asis_config_router
 from app.routers.asis_sync import router as asis_sync_router
 from app.routers.asis import (
@@ -38,6 +39,7 @@ __all__ = [
     "order_service_router",
     "region_router",
     "expedition_router",
+    "service_point_router",
     "asis_config_router",
     "asis_sync_router",
     "asis_company_router",
