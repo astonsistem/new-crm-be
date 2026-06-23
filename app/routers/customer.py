@@ -1,22 +1,333 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
-from sqlalchemy.orm import joinedload
-from typing import List, Optional
-from uuid import UUID
 from datetime import datetime
-from app.dependencies import get_current_active_user, get_db
-from app.models import User, Customer
-from app.models.region import Province, District
-from app.schemas.customer import CustomerCreate, CustomerUpdate, CustomerResponse
-from pydantic import BaseModel
+from typing import Optional
+from uuid import UUID
 
-# Wrapper response models for pagination with total count
-class CustomerListResponse(BaseModel):
-    data: List[CustomerResponse]
-    total: int
-    
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
+
+from app.dependencies import get_current_active_user, get_db
+from app.models import Customer, User
+from app.models.region import District, Province
+from app.schemas.customer import (
+    CustomerCreate,
+    CustomerListResponse,
+    CustomerResponse,
+    CustomerUpdate,
+)
+from app.utils.db_queries import fetch_one, fetch_scalar_first, row_exists
+
 router = APIRouter(prefix="/customers", tags=["Customers"])
+
+
+def _customer_load_options():
+    return (
+        joinedload(Customer.sales_user),
+        joinedload(Customer.province),
+        joinedload(Customer.district),
+    )
+
+
+def _apply_deleted_filter(conditions: list, include_deleted: bool) -> None:
+    if not include_deleted:
+        conditions.append(Customer.deleted_at.is_(None))
+
+
+def _append_search_filter(conditions: list, search: str) -> None:
+    search_pattern = f"%{search}%"
+    conditions.append(
+        (Customer.name.ilike(search_pattern))
+        | (Customer.email.ilike(search_pattern))
+        | (Customer.phone.ilike(search_pattern))
+        | (Customer.address.ilike(search_pattern))
+        | (Customer.PIC.ilike(search_pattern))
+        | (Customer.pic_phone.ilike(search_pattern))
+    )
+
+
+async def _query_customer_list(
+    db: AsyncSession,
+    conditions: list,
+    skip: int,
+    limit: int,
+) -> CustomerListResponse:
+    total = await fetch_scalar_first(
+        db,
+        select(func.count()).select_from(Customer).where(*conditions),
+    ) or 0
+    result = await db.execute(
+        select(Customer)
+        .options(*_customer_load_options())
+        .where(*conditions)
+        .offset(skip)
+        .limit(limit)
+    )
+    customers = result.scalars().unique().all()
+    return CustomerListResponse(
+        data=[CustomerResponse.model_validate(customer) for customer in customers],
+        total=total,
+    )
+
+
+async def _fetch_customer_with_relations(
+    db: AsyncSession,
+    customer_id: UUID,
+) -> Customer:
+    customer = await fetch_one(
+        db,
+        select(Customer).options(*_customer_load_options()).where(Customer.id == customer_id),
+    )
+    if not customer:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found",
+        )
+    return customer
+
+
+async def _fetch_linked_username(db: AsyncSession, customer_id: UUID) -> str | None:
+    return await fetch_scalar_first(
+        db,
+        select(User.username).where(
+            User.customer_id == customer_id,
+            User.deleted_at.is_(None),
+        ),
+    )
+
+
+async def _deactivate_linked_users(db: AsyncSession, customer_id: UUID) -> None:
+    result = await db.execute(
+        select(User).where(
+            User.customer_id == customer_id,
+            User.deleted_at.is_(None),
+        )
+    )
+    for user in result.scalars().all():
+        user.is_active = False
+
+
+async def _activate_linked_users(db: AsyncSession, customer_id: UUID) -> None:
+    result = await db.execute(
+        select(User).where(
+            User.customer_id == customer_id,
+            User.deleted_at.is_(None),
+        )
+    )
+    for user in result.scalars().all():
+        user.is_active = True
+
+
+async def _ensure_unique_email(
+    db: AsyncSession,
+    email: str,
+    *,
+    exclude_customer_id: UUID | None = None,
+) -> None:
+    conditions = [Customer.email == email, Customer.deleted_at.is_(None)]
+    if exclude_customer_id:
+        conditions.append(Customer.id != exclude_customer_id)
+    if await row_exists(db, select(Customer.id).where(*conditions)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Customer with this email already exists",
+        )
+
+
+async def _ensure_sales_user_exists(db: AsyncSession, sales_id: UUID) -> None:
+    if not await row_exists(db, select(User.id).where(User.id == sales_id)):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sales user not found",
+        )
+
+
+async def _ensure_company_exists(db: AsyncSession, company_id: UUID) -> Customer:
+    company = await fetch_one(
+        db,
+        select(Customer).where(
+            Customer.id == company_id,
+            Customer.type == "COMPANY",
+            Customer.deleted_at.is_(None),
+        ),
+    )
+    if not company:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Company (pusat) not found",
+        )
+    return company
+
+
+async def _ensure_region_exists(
+    db: AsyncSession,
+    region_id: UUID,
+    *,
+    expected_pusat_id: UUID | None = None,
+) -> Customer:
+    region = await fetch_one(
+        db,
+        select(Customer).where(
+            Customer.id == region_id,
+            Customer.type == "REGION",
+            Customer.deleted_at.is_(None),
+        ),
+    )
+    if not region:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Region not found",
+        )
+    if expected_pusat_id and region.pusat_id != expected_pusat_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Region does not belong to the specified company",
+        )
+    return region
+
+
+async def _ensure_province_exists(db: AsyncSession, province_id: UUID) -> None:
+    if not await row_exists(
+        db,
+        select(Province.id).where(
+            Province.id == province_id,
+            Province.deleted_at.is_(None),
+        ),
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Province not found",
+        )
+
+
+async def _ensure_district_exists(
+    db: AsyncSession,
+    district_id: UUID,
+    province_id: UUID,
+) -> None:
+    district = await fetch_one(
+        db,
+        select(District).where(
+            District.id == district_id,
+            District.deleted_at.is_(None),
+        ),
+    )
+    if not district:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="District not found",
+        )
+    if district.province_id != province_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="District does not belong to the specified province",
+        )
+
+
+async def _validate_customer_create(db: AsyncSession, customer_data: CustomerCreate) -> None:
+    if customer_data.email:
+        await _ensure_unique_email(db, customer_data.email)
+
+    await _ensure_sales_user_exists(db, customer_data.sales_id)
+
+    if customer_data.pusat_id:
+        await _ensure_company_exists(db, customer_data.pusat_id)
+
+    if customer_data.region_id:
+        await _ensure_region_exists(
+            db,
+            customer_data.region_id,
+            expected_pusat_id=customer_data.pusat_id,
+        )
+
+    if customer_data.province_id:
+        await _ensure_province_exists(db, customer_data.province_id)
+
+    if customer_data.district_id:
+        if not customer_data.province_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="district_id requires province_id to be set",
+            )
+        await _ensure_district_exists(
+            db,
+            customer_data.district_id,
+            customer_data.province_id,
+        )
+
+
+async def _validate_customer_update(
+    db: AsyncSession,
+    customer: Customer,
+    update_data: dict,
+) -> None:
+    if update_data.get("sales_id"):
+        await _ensure_sales_user_exists(db, update_data["sales_id"])
+
+    if (
+        "email" in update_data
+        and update_data["email"]
+        and update_data["email"] != customer.email
+    ):
+        await _ensure_unique_email(
+            db,
+            update_data["email"],
+            exclude_customer_id=customer.id,
+        )
+
+    new_type = update_data.get("type", customer.type)
+    new_pusat_id = update_data.get("pusat_id", customer.pusat_id)
+    new_region_id = update_data.get("region_id", customer.region_id)
+
+    if new_type == "COMPANY":
+        if new_pusat_id is not None or new_region_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="COMPANY type cannot have pusat_id or region_id",
+            )
+    elif new_type == "REGION":
+        if new_pusat_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="REGION type must have pusat_id",
+            )
+        if new_region_id is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="REGION type cannot have region_id",
+            )
+    elif new_type == "BRANCH":
+        if new_pusat_id is None or new_region_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="BRANCH type must have both pusat_id and region_id",
+            )
+
+    if update_data.get("pusat_id"):
+        await _ensure_company_exists(db, update_data["pusat_id"])
+
+    if update_data.get("region_id"):
+        await _ensure_region_exists(
+            db,
+            update_data["region_id"],
+            expected_pusat_id=new_pusat_id,
+        )
+
+    if update_data.get("province_id"):
+        await _ensure_province_exists(db, update_data["province_id"])
+
+    if update_data.get("district_id"):
+        new_province_id = update_data.get("province_id", customer.province_id)
+        if not new_province_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="district_id requires province_id to be set",
+            )
+        await _ensure_district_exists(
+            db,
+            update_data["district_id"],
+            new_province_id,
+        )
 
 
 # List all customers with pagination
@@ -32,6 +343,10 @@ async def get_customers(
     sales_id: Optional[UUID] = Query(None, description="Filter by sales person ID"),
     province_id: Optional[UUID] = Query(None, description="Filter by province ID"),
     district_id: Optional[UUID] = Query(None, description="Filter by district ID"),
+    include_deleted: bool = Query(
+        False,
+        description="If true, include soft-deleted customers. If false, only active customers.",
+    ),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -48,19 +363,13 @@ async def get_customers(
     - **sales_id**: Filter by sales person ID
     - **province_id**: Filter by province ID
     - **district_id**: Filter by district ID
+    - **include_deleted**: false = hide deleted (default), true = show all
     """
-    conditions = [Customer.deleted_at.is_(None)]
+    conditions = []
+    _apply_deleted_filter(conditions, include_deleted)
 
     if search:
-        search_pattern = f"%{search}%"
-        conditions.append(
-            (Customer.name.ilike(search_pattern)) |
-            (Customer.email.ilike(search_pattern)) |
-            (Customer.phone.ilike(search_pattern)) |
-            (Customer.address.ilike(search_pattern)) |
-            (Customer.PIC.ilike(search_pattern)) |
-            (Customer.pic_phone.ilike(search_pattern))
-        )
+        _append_search_filter(conditions, search)
 
     if email:
         conditions.append(Customer.email == email)
@@ -83,23 +392,7 @@ async def get_customers(
     if district_id:
         conditions.append(Customer.district_id == district_id)
 
-    total = (await db.execute(
-        select(func.count()).select_from(Customer).where(*conditions)
-    )).scalar()
-
-    customers = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district)
-        ).where(*conditions).offset(skip).limit(limit)
-    )).scalars().all()
-
-    customer_responses = [CustomerResponse.model_validate(customer) for customer in customers]
-
-    return CustomerListResponse(data=customer_responses, total=total)
-
-
+    return await _query_customer_list(db, conditions, skip, limit)
 
 
 # Get current user's customers (for sales people)
@@ -114,6 +407,10 @@ async def get_my_customers(
     region_id: Optional[UUID] = Query(None, description="Filter by region ID"),
     province_id: Optional[UUID] = Query(None, description="Filter by province ID"),
     district_id: Optional[UUID] = Query(None, description="Filter by district ID"),
+    include_deleted: bool = Query(
+        False,
+        description="If true, include soft-deleted customers. If false, only active customers.",
+    ),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -129,22 +426,13 @@ async def get_my_customers(
     - **region_id**: Filter by region ID
     - **province_id**: Filter by province ID
     - **district_id**: Filter by district ID
+    - **include_deleted**: false = hide deleted (default), true = show all
     """
-    conditions = [
-        Customer.sales_id == current_user.id,
-        Customer.deleted_at.is_(None)
-    ]
+    conditions = [Customer.sales_id == current_user.id]
+    _apply_deleted_filter(conditions, include_deleted)
 
     if search:
-        search_pattern = f"%{search}%"
-        conditions.append(
-            (Customer.name.ilike(search_pattern)) |
-            (Customer.email.ilike(search_pattern)) |
-            (Customer.phone.ilike(search_pattern)) |
-            (Customer.address.ilike(search_pattern)) |
-            (Customer.PIC.ilike(search_pattern)) |
-            (Customer.pic_phone.ilike(search_pattern))
-        )
+        _append_search_filter(conditions, search)
 
     if email:
         conditions.append(Customer.email == email)
@@ -164,43 +452,30 @@ async def get_my_customers(
     if district_id:
         conditions.append(Customer.district_id == district_id)
 
-    total = (await db.execute(
-        select(func.count()).select_from(Customer).where(*conditions)
-    )).scalar()
-
-    customers = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district)
-        ).where(*conditions).offset(skip).limit(limit)
-    )).scalars().all()
-
-    customer_responses = [CustomerResponse.model_validate(customer) for customer in customers]
-
-    return CustomerListResponse(data=customer_responses, total=total)
+    return await _query_customer_list(db, conditions, skip, limit)
 
 
 # Get customer by ID
 @router.get("/{customer_id}", response_model=CustomerResponse)
 async def get_customer(
     customer_id: UUID,
+    include_deleted: bool = Query(
+        False,
+        description="If true, return customer even when soft-deleted.",
+    ),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Get a specific customer by ID
     """
-    customer = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district)
-        ).where(
-            Customer.id == customer_id,
-            Customer.deleted_at.is_(None)
-        )
-    )).scalar_one_or_none()
+    conditions = [Customer.id == customer_id]
+    _apply_deleted_filter(conditions, include_deleted)
+
+    customer = await fetch_one(
+        db,
+        select(Customer).options(*_customer_load_options()).where(*conditions),
+    )
 
     if not customer:
         raise HTTPException(
@@ -208,13 +483,7 @@ async def get_customer(
             detail="Customer not found"
         )
 
-    username = (await db.execute(
-        select(User.username).where(
-            User.customer_id == customer_id,
-            User.deleted_at.is_(None),
-        )
-    )).scalar_one_or_none()
-
+    username = await _fetch_linked_username(db, customer_id)
     response = CustomerResponse.model_validate(customer)
     return response.model_copy(update={"username": username})
 
@@ -241,98 +510,7 @@ async def create_customer(
     - **pusat_id**: Company ID (required for REGION and BRANCH)
     - **region_id**: Region ID (required for BRANCH)
     """
-    if customer_data.email:
-        existing_customer = (await db.execute(
-            select(Customer).where(
-                Customer.email == customer_data.email,
-                Customer.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if existing_customer:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Customer with this email already exists"
-            )
-
-    from app.models.user import User
-    sales_user = (await db.execute(
-        select(User).where(User.id == customer_data.sales_id)
-    )).scalar_one_or_none()
-    if not sales_user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Sales user not found"
-        )
-
-    if customer_data.pusat_id:
-        pusat = (await db.execute(
-            select(Customer).where(
-                Customer.id == customer_data.pusat_id,
-                Customer.type == "COMPANY",
-                Customer.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not pusat:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Company (pusat) not found"
-            )
-
-    if customer_data.region_id:
-        region = (await db.execute(
-            select(Customer).where(
-                Customer.id == customer_data.region_id,
-                Customer.type == "REGION",
-                Customer.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not region:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Region not found"
-            )
-        if customer_data.pusat_id and region.pusat_id != customer_data.pusat_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Region does not belong to the specified company"
-            )
-
-    if customer_data.province_id:
-        province = (await db.execute(
-            select(Province).where(
-                Province.id == customer_data.province_id,
-                Province.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not province:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Province not found"
-            )
-
-    if customer_data.district_id:
-        if not customer_data.province_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="district_id requires province_id to be set"
-            )
-
-        district = (await db.execute(
-            select(District).where(
-                District.id == customer_data.district_id,
-                District.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not district:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="District not found"
-            )
-        if district.province_id != customer_data.province_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="District does not belong to the specified province"
-            )
+    await _validate_customer_create(db, customer_data)
 
     new_customer = Customer(
         type=customer_data.type,
@@ -351,16 +529,8 @@ async def create_customer(
 
     db.add(new_customer)
     await db.commit()
-    await db.refresh(new_customer)
 
-    customer = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district)
-        ).where(Customer.id == new_customer.id)
-    )).scalar_one_or_none()
-
+    customer = await _fetch_customer_with_relations(db, new_customer.id)
     return CustomerResponse.model_validate(customer)
 
 
@@ -378,16 +548,13 @@ async def update_customer(
     - All fields are optional
     - Only provided fields will be updated
     """
-    customer = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district)
-        ).where(
+    customer = await fetch_one(
+        db,
+        select(Customer).options(*_customer_load_options()).where(
             Customer.id == customer_id,
-            Customer.deleted_at.is_(None)
-        )
-    )).scalar_one_or_none()
+            Customer.deleted_at.is_(None),
+        ),
+    )
 
     if not customer:
         raise HTTPException(
@@ -409,143 +576,14 @@ async def update_customer(
         update_data["district_id"] = update_data["district"]["id"]
         del update_data["district"]
 
-    if "sales_id" in update_data and update_data["sales_id"]:
-        from app.models.user import User
-        sales_user = (await db.execute(
-            select(User).where(User.id == update_data["sales_id"])
-        )).scalar_one_or_none()
-        if not sales_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Sales user not found"
-            )
-
-    if "email" in update_data and update_data["email"] and update_data["email"] != customer.email:
-        existing_customer = (await db.execute(
-            select(Customer).where(
-                Customer.email == update_data["email"],
-                Customer.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if existing_customer:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Customer with this email already exists"
-            )
-
-    new_type = update_data.get("type", customer.type)
-    new_pusat_id = update_data.get("pusat_id", customer.pusat_id)
-    new_region_id = update_data.get("region_id", customer.region_id)
-
-    if new_type == "COMPANY":
-        if new_pusat_id is not None or new_region_id is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="COMPANY type cannot have pusat_id or region_id"
-            )
-    elif new_type == "REGION":
-        if new_pusat_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="REGION type must have pusat_id"
-            )
-        if new_region_id is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="REGION type cannot have region_id"
-            )
-    elif new_type == "BRANCH":
-        if new_pusat_id is None or new_region_id is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="BRANCH type must have both pusat_id and region_id"
-            )
-
-    if "pusat_id" in update_data and update_data["pusat_id"]:
-        pusat = (await db.execute(
-            select(Customer).where(
-                Customer.id == update_data["pusat_id"],
-                Customer.type == "COMPANY",
-                Customer.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not pusat:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Company (pusat) not found"
-            )
-
-    if "region_id" in update_data and update_data["region_id"]:
-        region = (await db.execute(
-            select(Customer).where(
-                Customer.id == update_data["region_id"],
-                Customer.type == "REGION",
-                Customer.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not region:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Region not found"
-            )
-        if new_pusat_id and region.pusat_id != new_pusat_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Region does not belong to the specified company"
-            )
-
-    if "province_id" in update_data and update_data["province_id"]:
-        province = (await db.execute(
-            select(Province).where(
-                Province.id == update_data["province_id"],
-                Province.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not province:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Province not found"
-            )
-
-    if "district_id" in update_data and update_data["district_id"]:
-        new_province_id = update_data.get("province_id", customer.province_id)
-        if not new_province_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="district_id requires province_id to be set"
-            )
-
-        district = (await db.execute(
-            select(District).where(
-                District.id == update_data["district_id"],
-                District.deleted_at.is_(None)
-            )
-        )).scalar_one_or_none()
-        if not district:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="District not found"
-            )
-        if district.province_id != new_province_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="District does not belong to the specified province"
-            )
+    await _validate_customer_update(db, customer, update_data)
 
     for field, value in update_data.items():
         setattr(customer, field, value)
 
     await db.commit()
 
-    # Re-query with eager loading — db.refresh() strips loaded relationships
-    customer = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district),
-        ).where(Customer.id == customer_id)
-    )).scalar_one()
-
+    customer = await _fetch_customer_with_relations(db, customer_id)
     return CustomerResponse.model_validate(customer)
 
 
@@ -560,14 +598,16 @@ async def delete_customer(
     Soft delete a customer
     
     - Sets deleted_at timestamp
+    - Deactivates linked user accounts (is_active = false)
     - Customer can still be recovered later
     """
-    customer = (await db.execute(
+    customer = await fetch_one(
+        db,
         select(Customer).where(
             Customer.id == customer_id,
-            Customer.deleted_at.is_(None)
-        )
-    )).scalar_one_or_none()
+            Customer.deleted_at.is_(None),
+        ),
+    )
 
     if not customer:
         raise HTTPException(
@@ -576,6 +616,7 @@ async def delete_customer(
         )
 
     customer.deleted_at = datetime.utcnow()
+    await _deactivate_linked_users(db, customer_id)
     await db.commit()
 
     return None
@@ -591,33 +632,25 @@ async def restore_customer(
     """
     Restore a soft-deleted customer
     
-    - Clears deleted_at timestamp
+    - Clears deleted_at timestamp when set
+    - Reactivates linked user accounts (is_active = true)
     """
-    customer = (await db.execute(
-        select(Customer).where(
-            Customer.id == customer_id,
-            Customer.deleted_at.isnot(None)
-        )
-    )).scalar_one_or_none()
+    customer = await fetch_one(
+        db,
+        select(Customer).where(Customer.id == customer_id),
+    )
 
     if not customer:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Deleted customer not found"
+            detail="Customer not found"
         )
 
     customer.deleted_at = None
+    await _activate_linked_users(db, customer_id)
     await db.commit()
 
-    # Re-query with eager loading — db.refresh() strips loaded relationships
-    customer = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district),
-        ).where(Customer.id == customer_id)
-    )).scalar_one()
-
+    customer = await _fetch_customer_with_relations(db, customer_id)
     return CustomerResponse.model_validate(customer)
 
 
@@ -634,9 +667,10 @@ async def delete_customer_permanent(
     - ⚠️ This action cannot be undone
     - Use with caution
     """
-    customer = (await db.execute(
-        select(Customer).where(Customer.id == customer_id)
-    )).scalar_one_or_none()
+    customer = await fetch_one(
+        db,
+        select(Customer).where(Customer.id == customer_id),
+    )
 
     if not customer:
         raise HTTPException(
@@ -666,22 +700,7 @@ async def get_companies(
     if search:
         base_where.append(Customer.name.ilike(f"%{search}%"))
 
-    total = (await db.execute(
-        select(func.count(Customer.id)).where(*base_where)
-    )).scalar()
-
-    companies = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district),
-        ).where(*base_where).offset(skip).limit(limit)
-    )).scalars().unique().all()
-
-    return CustomerListResponse(
-        data=[CustomerResponse.model_validate(c) for c in companies],
-        total=total,
-    )
+    return await _query_customer_list(db, base_where, skip, limit)
 
 
 # Get regions by company
@@ -697,13 +716,14 @@ async def get_regions_by_company(
     """
     Get all regions belonging to a specific company with pagination
     """
-    company = (await db.execute(
+    company = await fetch_one(
+        db,
         select(Customer).where(
             Customer.id == company_id,
             Customer.type == "COMPANY",
-            Customer.deleted_at.is_(None)
-        )
-    )).scalar_one_or_none()
+            Customer.deleted_at.is_(None),
+        ),
+    )
 
     if not company:
         raise HTTPException(
@@ -719,22 +739,7 @@ async def get_regions_by_company(
     if search:
         base_where.append(Customer.name.ilike(f"%{search}%"))
 
-    total = (await db.execute(
-        select(func.count(Customer.id)).where(*base_where)
-    )).scalar()
-
-    regions = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district),
-        ).where(*base_where).offset(skip).limit(limit)
-    )).scalars().unique().all()
-
-    return CustomerListResponse(
-        data=[CustomerResponse.model_validate(r) for r in regions],
-        total=total,
-    )
+    return await _query_customer_list(db, base_where, skip, limit)
 
 
 # Get branches by region
@@ -750,13 +755,14 @@ async def get_branches_by_region(
     """
     Get all branches belonging to a specific region with pagination
     """
-    region = (await db.execute(
+    region = await fetch_one(
+        db,
         select(Customer).where(
             Customer.id == region_id,
             Customer.type == "REGION",
-            Customer.deleted_at.is_(None)
-        )
-    )).scalar_one_or_none()
+            Customer.deleted_at.is_(None),
+        ),
+    )
 
     if not region:
         raise HTTPException(
@@ -772,22 +778,7 @@ async def get_branches_by_region(
     if search:
         base_where.append(Customer.name.ilike(f"%{search}%"))
 
-    total = (await db.execute(
-        select(func.count(Customer.id)).where(*base_where)
-    )).scalar()
-
-    branches = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district),
-        ).where(*base_where).offset(skip).limit(limit)
-    )).scalars().unique().all()
-
-    return CustomerListResponse(
-        data=[CustomerResponse.model_validate(b) for b in branches],
-        total=total,
-    )
+    return await _query_customer_list(db, base_where, skip, limit)
 
 
 # Get all branches by company (across all regions)
@@ -803,13 +794,14 @@ async def get_branches_by_company(
     """
     Get all branches belonging to a specific company (across all regions) with pagination
     """
-    company = (await db.execute(
+    company = await fetch_one(
+        db,
         select(Customer).where(
             Customer.id == company_id,
             Customer.type == "COMPANY",
-            Customer.deleted_at.is_(None)
-        )
-    )).scalar_one_or_none()
+            Customer.deleted_at.is_(None),
+        ),
+    )
 
     if not company:
         raise HTTPException(
@@ -825,19 +817,4 @@ async def get_branches_by_company(
     if search:
         base_where.append(Customer.name.ilike(f"%{search}%"))
 
-    total = (await db.execute(
-        select(func.count(Customer.id)).where(*base_where)
-    )).scalar()
-
-    branches = (await db.execute(
-        select(Customer).options(
-            joinedload(Customer.sales_user),
-            joinedload(Customer.province),
-            joinedload(Customer.district),
-        ).where(*base_where).offset(skip).limit(limit)
-    )).scalars().unique().all()
-
-    return CustomerListResponse(
-        data=[CustomerResponse.model_validate(b) for b in branches],
-        total=total,
-    )
+    return await _query_customer_list(db, base_where, skip, limit)

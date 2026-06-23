@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, EmailStr, field_validator
-from typing import Optional, Literal
+from typing import List, Literal, Optional
 from datetime import datetime
 from uuid import UUID
 
@@ -111,6 +111,7 @@ class CustomerResponse(CustomerBase):
     province: Optional[ProvinceInfo] = None
     district: Optional[DistrictInfo] = None
     username: Optional[str] = Field(None, description="Login username of linked customer user, if any")
+    deleted_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -131,6 +132,11 @@ class CustomerResponse(CustomerBase):
             }
             return super().model_validate(customer_dict)
         return super().model_validate(customer)
+
+
+class CustomerListResponse(BaseModel):
+    data: List[CustomerResponse]
+    total: int
 
 
 class CustomerDetailResponse(CustomerBase):
