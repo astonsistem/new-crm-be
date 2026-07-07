@@ -128,6 +128,18 @@ class UserResponse(UserBase):
         from_attributes = True
 
 
+class UserDropdownResponse(BaseModel):
+    id: UUID
+    name: str
+    username: str
+    phone: Optional[str] = None
+    role_name: Optional[str] = None
+    role_scope: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 class UserInDB(UserBase):
     id: UUID
     password: str

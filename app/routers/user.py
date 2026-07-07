@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from typing import List, Optional
 from uuid import UUID
 from app.dependencies import get_current_active_user, get_db
@@ -8,17 +9,15 @@ from app.models import User, Role
 from app.models.customer import Customer
 from app.models.asis_sync import AsisCompany, AsisBranch, AsisWarehouse
 from app.schemas import UserCreate, UserUpdate, UserResponse
+from app.schemas.auth import CustomerDetail, AsisEntityBrief, UserDropdownResponse
 from app.utils.security import get_password_hash
 from app.utils.eager_loads import user_selectinload_options
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
-
 def _user_opts():
     return user_selectinload_options()
 
-
-# Get current user profile
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(
     current_user: User = Depends(get_current_active_user)
@@ -27,7 +26,6 @@ async def get_current_user_profile(
     Get current user profile - Protected endpoint
     Requires valid access token
     """
-    from app.schemas.auth import CustomerDetail, AsisEntityBrief
     return UserResponse(
         id=current_user.id,
         name=current_user.name,
@@ -66,8 +64,6 @@ async def get_current_user_profile(
         updated_by=current_user.updated_by
     )
 
-
-# List all users with pagination
 @router.get("/", response_model=List[UserResponse])
 async def get_users(
     skip: int = Query(0, ge=0),
@@ -122,7 +118,6 @@ async def get_users(
     stmt = stmt.offset(skip).limit(limit)
     users = (await db.execute(stmt)).scalars().unique().all()
 
-    from app.schemas.auth import CustomerDetail
     result = []
     for user in users:
         result.append(UserResponse(
@@ -159,8 +154,52 @@ async def get_users(
 
     return result
 
+@router.get("/dropdown", response_model=List[UserDropdownResponse])
+async def dropdown_users(
+    search: Optional[str] = Query(None, description="Cari nama atau username (partial, case-insensitive)"),
+    is_active: Optional[bool] = Query(True, description="Filter by active status"),
+    role_id: Optional[UUID] = Query(None, description="Filter by role ID"),
+    role_scope: Optional[str] = Query(None, description="Filter by role scope: ADMIN, SALES, CUSTOMER"),
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Semua user untuk dropdown (tanpa paginasi)."""
+    stmt = (
+        select(User)
+        .options(joinedload(User.role))
+        .where(User.deleted_at.is_(None))
+        .order_by(User.name)
+    )
 
-# Get user by ID
+    if is_active is not None:
+        stmt = stmt.where(User.is_active == is_active)
+
+    if role_id is not None:
+        stmt = stmt.where(User.role_id == role_id)
+
+    if role_scope is not None:
+        stmt = stmt.join(Role, User.role_id == Role.id).where(Role.scope == role_scope)
+
+    if search:
+        pattern = f"%{search}%"
+        stmt = stmt.where(
+            User.name.ilike(pattern) | User.username.ilike(pattern)
+        )
+
+    users = (await db.execute(stmt)).scalars().unique().all()
+
+    return [
+        UserDropdownResponse(
+            id=user.id,
+            name=user.name,
+            username=user.username,
+            phone=user.phone,
+            role_name=user.role.name if user.role else None,
+            role_scope=user.role.scope if user.role else None,
+        )
+        for user in users
+    ]
+
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user(
     user_id: UUID,
@@ -180,7 +219,6 @@ async def get_user(
             detail="User not found"
         )
 
-    from app.schemas.auth import CustomerDetail
     return UserResponse(
         id=user.id,
         name=user.name,
@@ -213,8 +251,6 @@ async def get_user(
         updated_by=user.updated_by
     )
 
-
-# Create new user
 @router.post("/", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def create_user(
     user_data: UserCreate,
@@ -281,7 +317,6 @@ async def create_user(
     await db.commit()
     await db.refresh(new_user)
 
-    from app.schemas.auth import CustomerDetail
     return UserResponse(
         id=new_user.id,
         name=new_user.name,
@@ -306,8 +341,6 @@ async def create_user(
         updated_by=new_user.updated_by
     )
 
-
-# Update user
 @router.put("/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: UUID,
@@ -382,12 +415,10 @@ async def update_user(
     user.updated_by = current_user.id
 
     await db.commit()
-    # Re-query with eager loading — db.refresh() strips loaded relationships
     user = (await db.execute(
         select(User).options(*_user_opts()).where(User.id == user_id)
     )).scalar_one()
 
-    from app.schemas.auth import CustomerDetail, AsisEntityBrief
     return UserResponse(
         id=user.id,
         name=user.name,
@@ -426,8 +457,6 @@ async def update_user(
         updated_by=user.updated_by
     )
 
-
-# Soft delete user (deactivate)
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def deactivate_user(
     user_id: UUID,
@@ -461,8 +490,6 @@ async def deactivate_user(
 
     return None
 
-
-# Reactivate user
 @router.patch("/{user_id}/activate", response_model=UserResponse)
 async def activate_user(
     user_id: UUID,
@@ -486,12 +513,10 @@ async def activate_user(
 
     user.is_active = True
     await db.commit()
-    # Re-query with eager loading — db.refresh() strips loaded relationships
     user = (await db.execute(
         select(User).options(*_user_opts()).where(User.id == user_id)
     )).scalar_one()
 
-    from app.schemas.auth import CustomerDetail
     return UserResponse(
         id=user.id,
         name=user.name,
@@ -524,8 +549,6 @@ async def activate_user(
         updated_by=user.updated_by
     )
 
-
-# Hard delete user (permanent)
 @router.delete("/{user_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user_permanent(
     user_id: UUID,

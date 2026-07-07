@@ -2,15 +2,19 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
 from pathlib import Path
 from app.dependencies import get_current_active_user, get_db
 from app.utils.permissions import require_permission, Permission
+from app.utils.bast import build_bast_pdf
 from app.routers.orders.helpers import fetch_order_customer
 from app.models import User
 from app.models.order import Order_Customer, Order_Payment_File, Order_Activity_Log
+from app.models.mou import MOU_Device
+from app.models.serial_number import Serial_Number
 from app.schemas.orders.customer_order import OrderPaymentFileResponse
 
 router = APIRouter(prefix="/bast", tags=["BAST (Berita Acara Serah Terima)"])
@@ -34,7 +38,6 @@ async def generate_bast(
     db: AsyncSession = Depends(get_db)
 ):
     """Generate a BAST (Berita Acara Serah Terima) PDF for a specific order"""
-    from app.utils.bast import build_bast_pdf
 
     order = await fetch_order_customer(db, order_id)
 
@@ -44,7 +47,16 @@ async def generate_bast(
             detail="Order not found"
         )
 
-    buffer = build_bast_pdf(order)
+    mou_devices = (await db.execute(
+        select(MOU_Device)
+        .options(
+            joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
+        )
+        .where(MOU_Device.mou_id == order.mou_id)
+        .order_by(MOU_Device.id)
+    )).scalars().all()
+
+    buffer = build_bast_pdf(order, mou_devices)
     filename = f"BAST_{order.order_number}_{datetime.now().strftime('%Y%m%d')}.pdf"
 
     return StreamingResponse(

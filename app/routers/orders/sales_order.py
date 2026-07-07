@@ -19,6 +19,7 @@ from app.models import User, Customer
 from app.models.order import Order_Customer, Order_Customer_Detail, Order_Status, Order_Payment_File, Order_Activity_Log, Order_Service
 from app.models.expedition import Expedition
 from app.models.mou import MOU, MOU_Product, MOU_Device
+from app.models.service_point import Service_Point
 from app.models.serial_number import Serial_Number
 from app.models.status import Status_Service
 from app.schemas.orders.customer_order import (
@@ -440,7 +441,7 @@ async def export_sales_order_log(
                     joinedload(Order_Service.mou),
                     joinedload(Order_Service.status_service),
                     joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
-                    joinedload(Order_Service.service_point),
+                    joinedload(Order_Service.service_point).joinedload(Service_Point.user),
                 ).join(MOU, Order_Service.mou_id == MOU.id
                 ).join(Customer, MOU.customer_id == Customer.id
                 ).outerjoin(User, Customer.sales_id == User.id

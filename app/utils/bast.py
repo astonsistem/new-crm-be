@@ -13,7 +13,37 @@ LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "aston_logo.
 SIGNATURE_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "signature.png")
 
 
-def build_bast_pdf(order) -> io.BytesIO:
+def _device_display(mou_device) -> tuple[str, str]:
+    if not mou_device or not mou_device.serial_number:
+        return "-", "-"
+
+    asset = mou_device.serial_number.asset
+    device_name = asset.asset_name if asset else "-"
+    serial_number = mou_device.serial_number.serial_code or "-"
+    return device_name, serial_number
+
+
+def _resolve_detail_device(detail, mou_devices: list, line_index: int) -> tuple[str, str]:
+    device_name = detail.device_name
+    serial_number = detail.serial_number
+
+    if device_name and serial_number:
+        return device_name, serial_number
+
+    if mou_devices:
+        device = (
+            mou_devices[0]
+            if len(mou_devices) == 1
+            else mou_devices[min(line_index, len(mou_devices) - 1)]
+        )
+        fallback_name, fallback_serial = _device_display(device)
+        device_name = device_name or fallback_name
+        serial_number = serial_number or fallback_serial
+
+    return device_name or "-", serial_number or "-"
+
+
+def build_bast_pdf(order, mou_devices: list | None = None) -> io.BytesIO:
     """
     Build a BAST (Berita Acara Serah Terima) PDF for the given order.
 
@@ -213,14 +243,14 @@ def build_bast_pdf(order) -> io.BytesIO:
     ]
 
     # Item rows - read device_name and serial_number from order details
+    mou_devices = mou_devices or []
     for idx, detail in enumerate(order.order_details, 1):
         product_name = (
             detail.mou_product.product.product_name
             if detail.mou_product and detail.mou_product.product
             else "N/A"
         )
-        device_name = detail.device_name or "-"
-        serial_number = detail.serial_number or "-"
+        device_name, serial_number = _resolve_detail_device(detail, mou_devices, idx - 1)
         keterangan = f"{detail.quantity} PCS Tinta Isi Ulang" if "consumables" in product_name.lower() else f"{detail.quantity} PCS"
 
         table_data.append([

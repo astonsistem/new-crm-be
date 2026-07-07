@@ -16,6 +16,7 @@ from app.models import User, Customer
 from app.models.order import Order_Service, Service_Activity_Log
 from app.models.mou import MOU, MOU_Device
 from app.models.serial_number import Serial_Number
+from app.models.service_point import Service_Point
 from app.models.status import Status_Service
 from app.schemas.orders.service import (
     OrderServiceCreate,
@@ -59,7 +60,7 @@ def _service_load_options(*, include_user_customer: bool = False):
         joinedload(Order_Service.mou),
         joinedload(Order_Service.status_service),
         joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
-        joinedload(Order_Service.service_point),
+        joinedload(Order_Service.service_point).joinedload(Service_Point.user),
         created_user_load,
         joinedload(Order_Service.activity_logs).joinedload(Service_Activity_Log.user),
     ]
@@ -328,7 +329,7 @@ async def export_service_order_log(
         joinedload(Order_Service.status_service),
         joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
         joinedload(Order_Service.created_user),
-        joinedload(Order_Service.service_point),
+        joinedload(Order_Service.service_point).joinedload(Service_Point.user),
     ).join(MOU, Order_Service.mou_id == MOU.id)\
      .join(Customer, MOU.customer_id == Customer.id)
 
