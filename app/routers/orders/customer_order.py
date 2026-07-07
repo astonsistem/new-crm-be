@@ -17,6 +17,7 @@ from app.routers.orders.helpers import order_customer_load_options, fetch_order_
 from app.models import User, Customer
 from app.models.order import Order_Customer, Order_Customer_Detail, Order_Cart, Order_Status, Order_Payment_File, Order_Service, Order_Activity_Log, Service_Activity_Log
 from app.models.mou import MOU, MOU_Product, MOU_Device
+from app.models.service_point import Service_Point
 from app.models.serial_number import Serial_Number
 from app.schemas.orders.customer_order import (
     OrderCheckoutRequest,
@@ -256,7 +257,7 @@ async def get_my_log(
                 joinedload(Order_Service.mou),
                 joinedload(Order_Service.status_service),
                 joinedload(Order_Service.mou_device).joinedload(MOU_Device.serial_number).joinedload(Serial_Number.asset),
-                joinedload(Order_Service.service_point),
+                joinedload(Order_Service.service_point).joinedload(Service_Point.user),
                 joinedload(Order_Service.created_user),
                 joinedload(Order_Service.activity_logs).joinedload(Service_Activity_Log.user),
             ).where(Order_Service.mou_id.in_(mou_ids))
