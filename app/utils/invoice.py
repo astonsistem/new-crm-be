@@ -12,13 +12,14 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 LOGO_PATH = os.path.join(os.path.dirname(__file__), "..", "assets", "aston_logo.png")
 
 
-def build_invoice_pdf(order) -> io.BytesIO:
+def build_invoice_pdf(order, bank_accounts: list | None = None) -> io.BytesIO:
     """
     Build a PDF invoice for the given order.
     
     Args:
         order: Order_Customer object with loaded relationships
               (mou, customer, status, order_details.mou_product.product)
+        bank_accounts: optional list of Bank_Account for payment instructions
     
     Returns:
         BytesIO buffer containing the PDF data
@@ -279,7 +280,39 @@ def build_invoice_pdf(order) -> io.BytesIO:
 
     items_table.setStyle(TableStyle(table_style_commands))
     elements.append(items_table)
-    elements.append(Spacer(1, 10 * mm))
+    elements.append(Spacer(1, 8 * mm))
+
+    # ===== PAYMENT INFO (BANK ACCOUNTS) =====
+    if bank_accounts:
+        payment_title_style = ParagraphStyle(
+            "PaymentTitle",
+            parent=styles["Normal"],
+            fontSize=10,
+            fontName="Helvetica-Bold",
+            textColor=colors.HexColor("#111827"),
+            spaceAfter=2 * mm,
+        )
+        payment_body_style = ParagraphStyle(
+            "PaymentBody",
+            parent=styles["Normal"],
+            fontSize=9,
+            textColor=colors.HexColor("#374151"),
+            leading=13,
+        )
+
+        elements.append(Paragraph("Informasi Pembayaran", payment_title_style))
+        payment_lines = []
+        for account in bank_accounts:
+            branch_text = f" — {account.bank_branch}" if getattr(account, "bank_branch", None) else ""
+            payment_lines.append(
+                f"<b>{account.bank_name}</b>{branch_text}<br/>"
+                f"No. Rekening: <b>{account.account_number}</b><br/>"
+                f"a.n. {account.account_holder}"
+            )
+        elements.append(Paragraph("<br/><br/>".join(payment_lines), payment_body_style))
+        elements.append(Spacer(1, 8 * mm))
+    else:
+        elements.append(Spacer(1, 2 * mm))
 
     # ===== FOOTER =====
     footer_style = ParagraphStyle(

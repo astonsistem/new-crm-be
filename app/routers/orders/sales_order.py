@@ -14,7 +14,13 @@ from app.dependencies import get_current_active_user, get_db
 from app.utils.permissions import require_permission, Permission
 from app.utils.db_queries import fetch_first
 from app.utils.datetime_utils import NaiveDatetime, OptionalNaiveDatetime
-from app.routers.orders.helpers import order_customer_load_options, fetch_order_customer
+from app.routers.orders.helpers import (
+    order_customer_load_options,
+    fetch_order_customer,
+    fetch_order_for_deletion,
+    assert_can_delete_order,
+    delete_order_files_from_disk,
+)
 from app.models import User, Customer
 from app.models.order import Order_Customer, Order_Customer_Detail, Order_Status, Order_Payment_File, Order_Activity_Log, Order_Service
 from app.models.expedition import Expedition
@@ -612,6 +618,33 @@ async def get_sales_performance_overview(
         overall_orders=overall_orders,
         overall_revenue=overall_revenue
     )
+
+
+@router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_sales_order(
+    order_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hapus order customer (akses sales/admin).
+
+    - Sales: order customer milik sales, status menunggu pembayaran / menunggu persetujuan
+    - Admin: semua order (permission order.delete)
+    """
+    order = await fetch_order_for_deletion(db, order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order tidak ditemukan",
+        )
+
+    assert_can_delete_order(order, current_user)
+    delete_order_files_from_disk(order.payment_files)
+
+    await db.delete(order)
+    await db.commit()
+    return None
+
 
 # Waiting approval payment (Customer and Sales)
 @router.put("/{order_id}/waiting-approval-payment", response_model=OrderCustomerResponse)

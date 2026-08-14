@@ -9,6 +9,7 @@ from app.models.serial_number import Serial_Number
 from app.models.region import Province, District
 from app.models.expedition import Expedition
 from app.models.service_point import Service_Point
+from app.models.bank_account import Bank_Account
 from app.models.asis_config import AsisConfig
 from app.models.asis_sync import AsisCompany, AsisBranch, AsisWarehouse
 
@@ -36,6 +37,7 @@ __all__ = [
     "District",
     "Expedition",
     "Service_Point",
+    "Bank_Account",
     "AsisConfig",
     "AsisCompany",
     "AsisBranch",

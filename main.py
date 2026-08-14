@@ -33,6 +33,7 @@ from app.routers import (
     region_router,
     expedition_router,
     service_point_router,
+    bank_account_router,
     asis_config_router,
     asis_sync_router,
     asis_company_router,
@@ -263,6 +264,7 @@ app.include_router(service_file_router)
 app.include_router(region_router)
 app.include_router(expedition_router)
 app.include_router(service_point_router)
+app.include_router(bank_account_router)
 app.include_router(asis_config_router)
 app.include_router(asis_sync_router)
 app.include_router(asis_company_router)
