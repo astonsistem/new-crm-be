@@ -15,8 +15,8 @@ class Settings(BaseSettings):
     db_host: str = "localhost"
     db_port: str = "5432"
     db_user: str = "postgres"
-    db_password: str = "postgres"
-    db_name: str = "crm_db"
+    db_password: str = "PGUSER1"
+    db_name: str = "crm_new"
 
     # Full URL — if DATABASE_URL is set it takes precedence;
     # otherwise it is assembled from the DB_* components above.

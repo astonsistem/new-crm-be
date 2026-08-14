@@ -13,12 +13,20 @@ from app.dependencies import get_current_active_user, get_db
 from app.utils.permissions import require_permission, Permission
 from app.utils.db_queries import fetch_first
 from app.utils.datetime_utils import OptionalNaiveDatetime
-from app.routers.orders.helpers import order_customer_load_options, fetch_order_customer
+from app.utils.invoice import build_invoice_pdf
+from app.routers.orders.helpers import (
+    order_customer_load_options,
+    fetch_order_customer,
+    fetch_order_for_deletion,
+    assert_can_delete_order,
+    delete_order_files_from_disk,
+)
 from app.models import User, Customer
 from app.models.order import Order_Customer, Order_Customer_Detail, Order_Cart, Order_Status, Order_Payment_File, Order_Service, Order_Activity_Log, Service_Activity_Log
 from app.models.mou import MOU, MOU_Product, MOU_Device
 from app.models.service_point import Service_Point
 from app.models.serial_number import Serial_Number
+from app.models.bank_account import Bank_Account
 from app.schemas.orders.customer_order import (
     OrderCheckoutRequest,
     OrderCustomerResponse,
@@ -56,7 +64,7 @@ def get_user_customer_id(current_user: User) -> UUID:
     if not current_user.customer_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="User is not associated with any customer"
+            detail="User tidak terhubung dengan customer manapun"
         )
     return current_user.customer_id
 
@@ -91,7 +99,6 @@ async def get_completed_status(db: AsyncSession) -> Order_Status:
     return await _get_or_create_order_status(db, "completed", "Order completed and items received by customer")
 
 
-# Checkout - Convert cart to order
 @router.post("/checkout", response_model=OrderCustomerResponse, status_code=status.HTTP_201_CREATED)
 async def checkout_cart(
     checkout_data: OrderCheckoutRequest,
@@ -108,7 +115,7 @@ async def checkout_cart(
     if not cart_items:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cart is empty"
+            detail="Keranjang kosong"
         )
     
     mou = (await db.execute(
@@ -122,7 +129,7 @@ async def checkout_cart(
     if not mou:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="MOU not found or does not belong to your customer"
+            detail="MOU tidak ditemukan atau bukan milik customer Anda"
         )
     
     pending_status = await get_pending_payment_status(db)
@@ -187,13 +194,9 @@ async def checkout_cart(
     ))
 
     await db.commit()
-
     order = await fetch_order_customer(db, new_order.id)
-
     return order
 
-
-# Get customer's unified log (orders and services)
 @router.get("/my-log", response_model=CustomerLogResponse)
 async def get_my_log(
     customer_id: UUID = Query(..., description="Customer ID to get log for"),
@@ -295,7 +298,6 @@ async def get_my_log(
     )
 
 
-# Get specific order
 @router.get("/{order_id}", response_model=OrderCustomerResponse)
 async def get_order(
     order_id: UUID,
@@ -309,13 +311,39 @@ async def get_order(
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
     
     return order
 
 
-# Get activity log for an order
+@router.delete("/{order_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_order(
+    order_id: UUID,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Hapus order customer beserta detail, activity log, dan file terkait.
+
+    - Customer: order milik sendiri, status pending_payment / waiting_approval
+    - Sales: order customer milik sales, status pending_payment / waiting_approval
+    - Admin: semua order (permission order.delete)
+    """
+    order = await fetch_order_for_deletion(db, order_id)
+    if not order:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Order tidak ditemukan",
+        )
+
+    assert_can_delete_order(order, current_user)
+    delete_order_files_from_disk(order.payment_files)
+
+    await db.delete(order)
+    await db.commit()
+    return None
+
+
 @router.get("/{order_id}/activity-log", response_model=ActivityLogListResponse)
 async def get_order_activity_log(
     order_id: UUID,
@@ -331,7 +359,7 @@ async def get_order_activity_log(
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
 
     total = (await db.execute(
@@ -350,7 +378,6 @@ async def get_order_activity_log(
     return ActivityLogListResponse(data=logs, total=total)
 
 
-# Upload payment proof
 @router.post("/{order_id}/payment-proof", response_model=OrderPaymentFileResponse, status_code=status.HTTP_201_CREATED)
 async def upload_payment_proof(
     order_id: UUID,
@@ -376,7 +403,7 @@ async def upload_payment_proof(
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
     
     allowed_extensions = {'.jpg', '.jpeg', '.png', '.pdf'}
@@ -404,7 +431,7 @@ async def upload_payment_proof(
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"File type not allowed for {file.filename}. Only jpg, jpeg, png, pdf are allowed"
+            detail=f"Tipe file tidak diizinkan untuk {file.filename}. Hanya jpg, jpeg, png, dan pdf yang diperbolehkan"
         )
     
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -439,8 +466,6 @@ async def upload_payment_proof(
 
     return payment_file
 
-
-# List payment proofs for an order
 @router.get("/{order_id}/payment-proofs", response_model=List[OrderPaymentFileResponse])
 async def get_payment_proofs(
     order_id: UUID,
@@ -467,13 +492,13 @@ async def get_payment_proofs(
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Akses ditolak"
         )
     
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
     
     payment_files = (await db.execute(
@@ -484,8 +509,6 @@ async def get_payment_proofs(
     
     return payment_files
 
-
-# Download payment proof file
 @router.get("/payment-proofs/{file_id}/download")
 async def download_payment_proof(
     file_id: UUID,
@@ -502,32 +525,32 @@ async def download_payment_proof(
     if not payment_file:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payment file not found"
+            detail="File pembayaran tidak ditemukan"
         )
     
     if current_user.customer_id:
         if payment_file.order_customer.customer_id != current_user.customer_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     elif current_user.role and current_user.role.scope in ["SALES", "ADMIN"]:
         if current_user.role.scope != "ADMIN" and payment_file.order_customer.customer.sales_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Akses ditolak"
         )
     
     file_path = Path(payment_file.file_path)
     if not file_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found on server"
+            detail="File tidak ditemukan di server"
         )
     
     return FileResponse(
@@ -537,7 +560,6 @@ async def download_payment_proof(
     )
 
 
-# Complete order (Customer and Sales)
 @router.put("/{order_id}/complete", response_model=OrderCustomerResponse)
 async def complete_order(
     order_id: UUID,
@@ -564,13 +586,13 @@ async def complete_order(
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
     
     if order.status.name != "shipped":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Can only complete shipped orders"
+            detail="Hanya bisa menyelesaikan order dengan status dikirim (shipped)"
         )
     
     completed_status = await get_completed_status(db)
@@ -585,13 +607,9 @@ async def complete_order(
         created_by=current_user.id,
     ))
     await db.commit()
-    
     order = await fetch_order_customer(db, order_id)
-    
     return order
 
-
-# Get resi proofs for an order
 @router.get("/{order_id}/resi-proofs", response_model=List[OrderPaymentFileResponse])
 async def get_resi_proofs(
     order_id: UUID,
@@ -618,13 +636,13 @@ async def get_resi_proofs(
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Akses ditolak"
         )
     
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
     
     resi_files = (await db.execute(
@@ -637,7 +655,6 @@ async def get_resi_proofs(
     return resi_files
 
 
-# Download resi proof file
 @router.get("/resi-proofs/{file_id}/download")
 async def download_resi_proof(
     file_id: UUID,
@@ -657,32 +674,32 @@ async def download_resi_proof(
     if not resi_file:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Resi proof file not found"
+            detail="File bukti resi tidak ditemukan"
         )
     
     if current_user.customer_id:
         if resi_file.order_customer.customer_id != current_user.customer_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     elif current_user.role and current_user.role.scope in ["SALES", "ADMIN"]:
         if current_user.role.scope != "ADMIN" and resi_file.order_customer.customer.sales_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Akses ditolak"
         )
     
     file_path = Path(resi_file.file_path)
     if not file_path.exists():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="File not found on server"
+            detail="File tidak ditemukan di server"
         )
     
     return FileResponse(
@@ -691,8 +708,6 @@ async def download_resi_proof(
         media_type='application/octet-stream'
     )
 
-
-# Generate PDF Invoice
 @router.get("/{order_id}/invoice")
 async def generate_invoice(
     order_id: UUID,
@@ -700,17 +715,31 @@ async def generate_invoice(
     db: AsyncSession = Depends(get_db)
 ):
     """Generate a PDF invoice for a specific order"""
-    from app.utils.invoice import build_invoice_pdf
-    
     order = await fetch_order_customer(db, order_id)
     
     if not order:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
+            detail="Order tidak ditemukan"
         )
+
+    bank_accounts = (await db.execute(
+        select(Bank_Account).where(
+            Bank_Account.deleted_at.is_(None),
+            Bank_Account.is_active.is_(True),
+            Bank_Account.is_default.is_(True),
+        ).order_by(Bank_Account.bank_name.asc())
+    )).scalars().all()
+
+    if not bank_accounts:
+        bank_accounts = (await db.execute(
+            select(Bank_Account).where(
+                Bank_Account.deleted_at.is_(None),
+                Bank_Account.is_active.is_(True),
+            ).order_by(Bank_Account.bank_name.asc())
+        )).scalars().all()
     
-    buffer = build_invoice_pdf(order)
+    buffer = build_invoice_pdf(order, bank_accounts=bank_accounts)
     filename = f"invoice_{order.order_number}_{datetime.now().strftime('%Y%m%d')}.pdf"
     
     return StreamingResponse(
@@ -719,8 +748,6 @@ async def generate_invoice(
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-
-# Delete payment proof file
 @router.delete("/payment-proofs/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_payment_proof(
     file_id: UUID,
@@ -737,25 +764,25 @@ async def delete_payment_proof(
     if not payment_file:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Payment file not found"
+            detail="File pembayaran tidak ditemukan"
         )
     
     if current_user.customer_id:
         if payment_file.order_customer.customer_id != current_user.customer_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     elif current_user.role and current_user.role.scope in ["SALES", "ADMIN"]:
         if current_user.role.scope != "ADMIN" and payment_file.order_customer.customer.sales_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Akses ditolak"
         )
     
     file_path = Path(payment_file.file_path)
@@ -768,7 +795,6 @@ async def delete_payment_proof(
     return None
 
 
-# Delete any order file (payment proof, resi proof, or BAST)
 @router.delete("/order-files/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_order_file(
     file_id: UUID,
@@ -796,25 +822,25 @@ async def delete_order_file(
     if not order_file:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Order file not found"
+            detail="File order tidak ditemukan"
         )
     
     if current_user.customer_id:
         if order_file.order_customer.customer_id != current_user.customer_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied" 
+                detail="Akses ditolak" 
             )
     elif current_user.role and current_user.role.scope in ["SALES", "ADMIN"]:
         if current_user.role.scope != "ADMIN" and order_file.order_customer.customer.sales_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
+                detail="Akses ditolak"
             )
     else:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="Akses ditolak"
         )
     
     file_path = Path(order_file.file_path)
