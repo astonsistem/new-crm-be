@@ -14,7 +14,7 @@ class Role(Base):
     name = Column(String(50), nullable=False, unique=True)
     description = Column(String(255))
     permissions = Column(ARRAY(String), default=[])
-    scope = Column(Enum("ADMIN", "SALES", "CUSTOMER", name="role_scope_enum"), nullable=False)
+    scope = Column(Enum("ADMIN", "SALES", "CUSTOMER", "TECHNICIAN", name="role_scope_enum"), nullable=False)
 
     # Relationships
     users = relationship("User", back_populates="role")

@@ -12,6 +12,7 @@ class ActorLevel(str, Enum):
     ADMIN = "ADMIN"
     SALES = "SALES"
     CUSTOMER = "CUSTOMER"
+    TECHNICIAN = "TECHNICIAN"
     COMPANY = "COMPANY"
     REGION = "REGION"
     BRANCH = "BRANCH"
@@ -179,6 +180,19 @@ LEVEL_PERMISSIONS: dict[ActorLevel, List[Permission]] = {
         Permission.CREATE_TRANSACTION,
         Permission.READ_TRANSACTION,
         Permission.READ_PRODUCT,
+    ],
+    ActorLevel.TECHNICIAN: [
+        # Service - read & update (handle service dari awal sampai selesai)
+        Permission.READ_SERVICE,
+        Permission.UPDATE_SERVICE,
+        # Customer - read (untuk koordinasi dengan customer)
+        Permission.READ_CUSTOMER,
+        # MOU - read (untuk lihat device & warranty info)
+        Permission.READ_MOU,
+        # Product - read (untuk lihat spec produk)
+        Permission.READ_PRODUCT,
+        # Asset - read (untuk lihat detail asset yang di-service)
+        Permission.READ_ASSET,
     ],
     ActorLevel.COMPANY: [
         # Customer - read (can see own regions & branches)
