@@ -6,6 +6,7 @@ from typing import List, Optional
 from uuid import UUID
 from datetime import datetime
 from app.dependencies import get_current_active_user, get_db
+from app.utils.datetime_utils import OptionalNaiveDatetime
 from app.models import User
 from app.models.mou import MOU
 from app.models.status import Status_MOU
@@ -217,6 +218,10 @@ async def get_my_created_mous(
     customer_id: Optional[UUID] = Query(None, description="Filter by customer ID"),
     status_mou_id: Optional[UUID] = Query(None, description="Filter by status ID"),
     include_deleted: bool = Query(False, description="Include soft-deleted MOUs"),
+    created_start: OptionalNaiveDatetime = Query(None, description="Filter MOU created after this date"),
+    created_end: OptionalNaiveDatetime = Query(None, description="Filter MOU created before this date"),
+    deleted_start: OptionalNaiveDatetime = Query(None, description="Filter MOU deleted after this date (requires include_deleted=true)"),
+    deleted_end: OptionalNaiveDatetime = Query(None, description="Filter MOU deleted before this date (requires include_deleted=true)"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -228,6 +233,10 @@ async def get_my_created_mous(
     - **customer_id**: Filter by customer ID (optional)
     - **status_mou_id**: Filter by status ID (optional)
     - **include_deleted**: Include soft-deleted MOUs (default: false)
+    - **created_start**: Filter MOU created after this date (optional)
+    - **created_end**: Filter MOU created before this date (optional)
+    - **deleted_start**: Filter MOU deleted after this date (optional, requires include_deleted=true)
+    - **deleted_end**: Filter MOU deleted before this date (optional, requires include_deleted=true)
     """
     conditions = [MOU.created_by == current_user.id]
     if not include_deleted:
@@ -236,6 +245,24 @@ async def get_my_created_mous(
         conditions.append(MOU.customer_id == customer_id)
     if status_mou_id:
         conditions.append(MOU.status_mou_id == status_mou_id)
+    
+    # Filter by created_at
+    if created_start:
+        conditions.append(MOU.created_at >= created_start)
+    if created_end:
+        # Set end of day jika jam 00:00:00
+        if created_end.hour == 0 and created_end.minute == 0 and created_end.second == 0:
+            created_end = created_end.replace(hour=23, minute=59, second=59)
+        conditions.append(MOU.created_at <= created_end)
+    
+    # Filter by deleted_at
+    if deleted_start:
+        conditions.append(MOU.deleted_at >= deleted_start)
+    if deleted_end:
+        # Set end of day jika jam 00:00:00
+        if deleted_end.hour == 0 and deleted_end.minute == 0 and deleted_end.second == 0:
+            deleted_end = deleted_end.replace(hour=23, minute=59, second=59)
+        conditions.append(MOU.deleted_at <= deleted_end)
 
     total = (await db.execute(
         select(func.count(MOU.id)).where(*conditions)

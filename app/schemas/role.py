@@ -8,6 +8,7 @@ class RoleScope(str, Enum):
     ADMIN = "ADMIN"
     SALES = "SALES"
     CUSTOMER = "CUSTOMER"
+    TECHNICIAN = "TECHNICIAN"
 
 
 class RoleBase(BaseModel):
