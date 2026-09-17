@@ -88,6 +88,10 @@ class CustomerUpdate(BaseModel):
     type: Optional[Literal["COMPANY", "REGION", "BRANCH"]] = None
     pusat_id: Optional[UUID] = None
     region_id: Optional[UUID] = None
+    sales_id: Optional[UUID] = Field(None, description="Sales user ID responsible for this customer")
+    province_id: Optional[UUID] = Field(None, description="Province ID")
+    district_id: Optional[UUID] = Field(None, description="District ID")
+    # Nested objects kept for backward compatibility with older clients
     sales: Optional[SalesInfo] = None
     province: Optional[ProvinceInfo] = None
     district: Optional[DistrictInfo] = None

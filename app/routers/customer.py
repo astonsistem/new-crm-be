@@ -316,8 +316,10 @@ async def _validate_customer_update(
     if update_data.get("province_id"):
         await _ensure_province_exists(db, update_data["province_id"])
 
-    if update_data.get("district_id"):
-        new_province_id = update_data.get("province_id", customer.province_id)
+    new_province_id = update_data.get("province_id", customer.province_id)
+    new_district_id = update_data.get("district_id", customer.district_id)
+
+    if "district_id" in update_data and update_data["district_id"] is not None:
         if not new_province_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -328,6 +330,14 @@ async def _validate_customer_update(
             update_data["district_id"],
             new_province_id,
         )
+    elif "province_id" in update_data and new_district_id is not None:
+        # Province changed but district kept — ensure district still belongs to new province
+        if not new_province_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="district_id requires province_id to be set",
+            )
+        await _ensure_district_exists(db, new_district_id, new_province_id)
 
 
 # List all customers with pagination
@@ -542,12 +552,6 @@ async def update_customer(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Update an existing customer
-    
-    - All fields are optional
-    - Only provided fields will be updated
-    """
     customer = await fetch_one(
         db,
         select(Customer).options(*_customer_load_options()).where(
@@ -564,17 +568,17 @@ async def update_customer(
 
     update_data = customer_data.model_dump(exclude_unset=True)
 
-    if "sales" in update_data and update_data["sales"]:
+    if "sales_id" not in update_data and "sales" in update_data and update_data["sales"]:
         update_data["sales_id"] = update_data["sales"]["id"]
-        del update_data["sales"]
+    update_data.pop("sales", None)
 
-    if "province" in update_data and update_data["province"]:
+    if "province_id" not in update_data and "province" in update_data and update_data["province"]:
         update_data["province_id"] = update_data["province"]["id"]
-        del update_data["province"]
+    update_data.pop("province", None)
 
-    if "district" in update_data and update_data["district"]:
+    if "district_id" not in update_data and "district" in update_data and update_data["district"]:
         update_data["district_id"] = update_data["district"]["id"]
-        del update_data["district"]
+    update_data.pop("district", None)
 
     await _validate_customer_update(db, customer, update_data)
 
