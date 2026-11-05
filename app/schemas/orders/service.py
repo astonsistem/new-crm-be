@@ -61,6 +61,8 @@ class UserBasicResponse(BaseModel):
 class MOUDeviceDetailResponse(BaseModel):
     id: UUID
     status: str
+    location: Optional[str] = None
+    installation_date: Optional[datetime] = None
     serial_number: SerialNumberDetailResponse
     
     class Config:

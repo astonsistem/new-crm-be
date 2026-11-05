@@ -55,6 +55,7 @@ class MOU_Device(Base):
     mou_id = Column(UUID(as_uuid=True), ForeignKey("mou.id"), nullable=False)
     location = Column(String(255), nullable=True)
     serial_number_id = Column(UUID(as_uuid=True), ForeignKey("serial_numbers.id"), nullable=False)
+    installation_date = Column(DateTime, nullable=True)
     status = Column(String(50), nullable=False, default="INACTIVE")
     # Possible values: "ACTIVE", "INACTIVE", "SERVICE"
 

@@ -10,7 +10,8 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.mou import MOU, MOU_Device, MOU_Product
+from app.models.mou import MOU, MOU_Product
+from app.routers.mou.mou_device_helpers import MOUDeviceFactory
 from app.models.status import Status_MOU
 from app.utils.db_queries import fetch_scalar_first
 from app.utils.eager_loads import mou_load_options
@@ -92,17 +93,14 @@ async def copy_mou_products(db: AsyncSession, old_mou_id: UUID, new_mou_id: UUID
 
 
 async def copy_mou_devices(db: AsyncSession, old_mou_id: UUID, new_mou_id: UUID) -> None:
+    from app.models.mou import MOU_Device
+
     devices = (await db.execute(
         select(MOU_Device).where(MOU_Device.mou_id == old_mou_id)
     )).scalars().all()
 
     for device in devices:
-        db.add(MOU_Device(
-            mou_id=new_mou_id,
-            serial_number_id=device.serial_number_id,
-            location=device.location,
-            status=device.status,
-        ))
+        db.add(MOUDeviceFactory.copy_for_mou_renewal(device, new_mou_id))
 
 
 async def close_expired_mou(db: AsyncSession, mou: MOU) -> MOU:

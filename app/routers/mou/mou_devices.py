@@ -10,6 +10,7 @@ from app.models.mou import MOU, MOU_Device
 from app.models.serial_number import Serial_Number
 from app.schemas.mou_device import MOUDeviceCreate, MOUDeviceUpdate, MOUDeviceResponse
 from app.routers.mou.mou_device_helpers import (
+    MOUDeviceFactory,
     build_mou_device_id_query,
     build_mou_devices_excel_response,
     enrich_mou_device_response,
@@ -247,11 +248,11 @@ async def create_mou_device(
             detail="This device is already assigned to this MOU"
         )
 
-    new_device = MOU_Device(
+    new_device = MOUDeviceFactory.create_active_assignment(
         mou_id=mou_id,
         serial_number_id=device.serial_number_id,
         location=device.location,
-        status="ACTIVE"
+        installation_date=device.installation_date,
     )
     db.add(new_device)
 
