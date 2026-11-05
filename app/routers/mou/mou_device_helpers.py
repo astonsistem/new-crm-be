@@ -21,6 +21,38 @@ from app.schemas.serial_number import SerialNumberStatus
 from app.utils.eager_loads import mou_device_load_options
 from app.utils.excel_export import format_worksheet
 
+
+class MOUDeviceFactory:
+    """Membangun entity MOU_Device untuk assign dan renew MOU."""
+
+    @staticmethod
+    def create_active_assignment(
+        *,
+        mou_id: UUID,
+        serial_number_id: UUID,
+        location: str,
+        installation_date=None,
+    ) -> MOU_Device:
+        return MOU_Device(
+            mou_id=mou_id,
+            serial_number_id=serial_number_id,
+            location=location,
+            status="ACTIVE",
+            installation_date=installation_date,
+        )
+
+    @staticmethod
+    def copy_for_mou_renewal(source: MOU_Device, new_mou_id: UUID) -> MOU_Device:
+        """Salin device ke MOU baru; installation_date sengaja null (reset)."""
+        return MOU_Device(
+            mou_id=new_mou_id,
+            serial_number_id=source.serial_number_id,
+            location=source.location,
+            status=source.status,
+            installation_date=None,
+        )
+
+
 def ensure_serial_assignable_to_mou(serial_number: Serial_Number) -> None:
     if serial_number.status == SerialNumberStatus.BROKEN.value:
         raise HTTPException(
@@ -43,6 +75,7 @@ MOU_DEVICE_EXPORT_COLUMNS = [
     "Serial Code",
     "Serial Status",
     "Location",
+    "Installation Date",
     "Device Status",
 ]
 
@@ -125,6 +158,11 @@ def mou_device_to_export_row(item: MOUDeviceResponse) -> dict:
         "Serial Code": serial_number.serial_code if serial_number else "N/A",
         "Serial Status": serial_number.status if serial_number else "N/A",
         "Location": item.location or "",
+        "Installation Date": (
+            item.installation_date.strftime("%Y-%m-%d %H:%M:%S")
+            if item.installation_date
+            else ""
+        ),
         "Device Status": item.status,
     }
 
