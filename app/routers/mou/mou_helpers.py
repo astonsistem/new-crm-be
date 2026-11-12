@@ -10,11 +10,64 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.customer import Customer
 from app.models.mou import MOU, MOU_Product
 from app.routers.mou.mou_device_helpers import MOUDeviceFactory
 from app.models.status import Status_MOU
 from app.utils.db_queries import fetch_scalar_first
 from app.utils.eager_loads import mou_load_options
+
+
+async def resolve_mou_customer_scope_ids(
+    db: AsyncSession,
+    root_customer_id: UUID,
+    *,
+    include_descendants: bool,
+) -> list[UUID]:
+    """
+    Customer IDs yang boleh dilihat di GET /mou/mou-list.
+
+    - include_descendants=False: hanya root (perilaku lama).
+    - COMPANY + descendants: company, semua REGION & BRANCH dengan pusat_id = company.
+    - REGION + descendants: region, semua BRANCH dengan region_id = region.
+    - BRANCH: hanya diri sendiri (descendants tidak menambah ID).
+    """
+    if not include_descendants:
+        return [root_customer_id]
+
+    customer = (await db.execute(
+        select(Customer).where(
+            Customer.id == root_customer_id,
+            Customer.deleted_at.is_(None),
+        )
+    )).scalar_one_or_none()
+
+    if customer is None:
+        return [root_customer_id]
+
+    customer_type = customer.type
+    scope_ids: set[UUID] = {root_customer_id}
+
+    if customer_type == "COMPANY":
+        descendant_ids = (await db.execute(
+            select(Customer.id).where(
+                Customer.deleted_at.is_(None),
+                Customer.pusat_id == root_customer_id,
+                Customer.type.in_(("REGION", "BRANCH")),
+            )
+        )).scalars().all()
+        scope_ids.update(descendant_ids)
+    elif customer_type == "REGION":
+        descendant_ids = (await db.execute(
+            select(Customer.id).where(
+                Customer.deleted_at.is_(None),
+                Customer.region_id == root_customer_id,
+                Customer.type == "BRANCH",
+            )
+        )).scalars().all()
+        scope_ids.update(descendant_ids)
+
+    return list(scope_ids)
 
 
 async def get_status_mou_id(db: AsyncSession, name: str) -> UUID:

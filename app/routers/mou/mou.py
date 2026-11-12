@@ -19,6 +19,7 @@ from app.routers.mou.mou_helpers import (
     fetch_active_mou,
     get_status_mou_id,
     renew_expired_mou,
+    resolve_mou_customer_scope_ids,
 )
 from app.utils.eager_loads import mou_load_options
 from app.utils.db_queries import fetch_first, fetch_scalar_first, row_exists
@@ -181,13 +182,21 @@ async def get_mou_list_by_customer(
     skip: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=100),
     include_deleted: bool = False,
+    include_descendants: bool = Query(
+        False,
+        description=(
+            "Jika true, COMPANY melihat MOU company + region + branch di bawahnya; "
+            "REGION melihat MOU region + branch di bawahnya; BRANCH tidak berubah"
+        ),
+    ),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Get list of MOUs for the currently logged-in customer
     
-    Returns all MOUs associated with the user's customer account
+    - Default: MOU dengan customer_id = akun customer user.
+    - include_descendants=true: cakupan hierarki customer (COMPANY / REGION).
     """
     if not current_user.customer_id:
         raise HTTPException(
@@ -195,7 +204,13 @@ async def get_mou_list_by_customer(
             detail="No customer associated with this user"
         )
 
-    conditions = [MOU.customer_id == current_user.customer_id]
+    customer_ids = await resolve_mou_customer_scope_ids(
+        db,
+        current_user.customer_id,
+        include_descendants=include_descendants,
+    )
+
+    conditions = [MOU.customer_id.in_(customer_ids)]
     if not include_deleted:
         conditions.append(MOU.deleted_at.is_(None))
 
@@ -204,7 +219,12 @@ async def get_mou_list_by_customer(
     )).scalar()
 
     mous = (await db.execute(
-        select(MOU).options(*mou_load_options()).where(*conditions).offset(skip).limit(limit)
+        select(MOU)
+        .options(*mou_load_options())
+        .where(*conditions)
+        .order_by(MOU.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )).scalars().all()
 
     return MOUListResponse(data=mous, total=total)
